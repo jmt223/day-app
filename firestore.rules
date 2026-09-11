@@ -1,0 +1,701 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // 로그인만으로는 부족하고, 이메일 인증까지 끝난 계정만 새 콘텐츠를 만들
+    // 수 있게 할 때 쓴다(스팸/가짜 계정 방지). email_verified는 ID 토큰에
+    // 실려 오는 값이라 클라이언트가 조작할 수 없다.
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    // authorId 사용자의 친구 목록에 요청자가 등록되어 있는지.
+    // get()/exists()는 대상 문서의 보안 규칙을 우회하여 평가되므로,
+    // friends 서브컬렉션의 읽기 권한을 별도로 열어줄 필요가 없다.
+    function friendOfAuthor(authorId) {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/users/$(authorId)/friends/$(request.auth.uid));
+    }
+
+    function friendGroupId(authorId) {
+      return get(/databases/$(database)/documents/users/$(authorId)/friends/$(request.auth.uid)).data.groupId;
+    }
+
+    // ownerUid가 otherUid를 차단했는지.
+    function isBlockedBy(ownerUid, otherUid) {
+      return exists(/databases/$(database)/documents/users/$(ownerUid)/blocked/$(otherUid));
+    }
+
+    // nickname/bio/photoURL 중 이번 요청에서 실제로 바뀐 필드만 형식을
+    // 검사한다(안 바뀐 필드는 이미 예전에 이 검사를 통과해 저장된 값이니
+    // 다시 검사할 필요가 없다 — 그래야 예전 데이터가 지금 기준에 살짝
+    // 안 맞아도, 그 필드를 안 건드리는 다른 수정(예: 푸시 토큰 등록)까지
+    // 막히지 않는다).
+    function validProfileFieldsIfChanged(before, after) {
+      let changed = after.diff(before).affectedKeys();
+      return
+        (!('nickname' in changed) ||
+          (after.nickname is string && after.nickname.size() > 0 && after.nickname.size() <= 30)) &&
+        (!('bio' in changed) || (after.bio is string && after.bio.size() <= 200)) &&
+        // photoURL은 자체 업로드(Firebase Storage) 뿐 아니라 구글/카카오
+        // 로그인이 그대로 넘겨주는 각 제공자 CDN 주소도 정상적으로 들어온다
+        // (예: 구글의 lh3.googleusercontent.com, 카카오의 CDN) — 그래서
+        // 여기서는 타입만 확인한다. "아무 외부 주소나 다 허용"이라는 뜻이라
+        // 이론상 추적 픽셀 악용 여지가 남지만, 구글/카카오가 실제로 쓰는
+        // 도메인을 안전하게 다 나열할 방법이 없어(바뀔 수도 있고, 잘못
+        // 나열하면 소셜 로그인 자체가 깨진다) 지금은 이 정도로 둔다.
+        (!('photoURL' in changed) || after.photoURL == null || after.photoURL is string) &&
+        (!('locale' in changed) || after.locale in ['ko', 'en']);
+    }
+
+    // 알림/친구요청 문서에 "보낸 사람 이름"을 발신자가 직접 적어 넣는데,
+    // 이걸 검증 안 하면 아무 계정이나 다른 사람 이름을 사칭해서 알림을
+    // 보낼 수 있다. 지금 로그인한 사람의 실제 프로필과 일치하는지 확인한다.
+    function senderNicknameMatches(nickname) {
+      return nickname == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.nickname;
+    }
+
+    // "펫 좀 보내줘" 호출(incomingSummons) 작성 검증. create/update 둘 다
+    // 쓰는데 update 시점엔 resource(기존 문서)가 있어 그 안에서 24시간
+    // 쿨다운을 추가로 확인하고, create는 첫 호출이라 쿨다운 검사가 없다
+    // (match 블록 안에 이 조건을 두 번 나눠 적기보다, 공통 부분만 여기
+    // 함수로 뺐다).
+    function validSummonWrite(toUid, fromUid) {
+      return isVerified() && request.auth.uid == fromUid &&
+        request.resource.data.fromUid == fromUid &&
+        request.resource.data.keys().hasOnly(['fromUid', 'fromNickname', 'fromPhotoURL', 'createdAt']) &&
+        senderNicknameMatches(request.resource.data.fromNickname) &&
+        (request.resource.data.fromPhotoURL == null || request.resource.data.fromPhotoURL is string) &&
+        request.resource.data.createdAt is timestamp &&
+        friendOfAuthor(toUid) &&
+        !isBlockedBy(toUid, request.auth.uid);
+    }
+
+    // DAY 데이터(data)에 대한 열람 가능 여부. days/{dayId}의 resource.data와
+    // 서브컬렉션에서 조회한 부모 DAY의 data 양쪽에 재사용한다.
+    function canReadDayData(data) {
+      return isSignedIn() && (
+        data.authorId == request.auth.uid ||
+        // 예정(draft)인 DAY는 아직 확정되지 않은 초안이라 작성자 본인만
+        // 볼 수 있다 — 위 조건에서 이미 걸러졌으니 여기 아래는 전부
+        // confirmed인 경우만 해당한다.
+        (data.status == 'confirmed' && data.deleted == false && (
+          data.visibility == 'public' ||
+          (data.visibility == 'friends' && friendOfAuthor(data.authorId)) ||
+          (data.visibility == 'group' && friendOfAuthor(data.authorId) && friendGroupId(data.authorId) == data.groupId)
+        ))
+      );
+    }
+
+    match /users/{uid} {
+      allow read: if isSignedIn();
+      // 예전엔 소유자이기만 하면 문서 내용은 전혀 검사하지 않아서, 예를 들어
+      // 닉네임에 화면을 다 깨뜨릴 정도의 초거대 문자열을 넣거나 dayCount를
+      // 처음부터 조작된 값으로 만들 수 있었다(이 문서는 누구나 읽을 수 있어서
+      // 다른 사용자가 볼 때마다 그대로 영향을 준다). ensureUserProfile이
+      // 실제로 만드는 모양 그대로만 허용한다.
+      allow create: if isOwner(uid) &&
+        request.resource.data.uid == uid &&
+        request.resource.data.keys().hasOnly(['uid', 'nickname', 'photoURL', 'bio', 'dayCount', 'createdAt']) &&
+        request.resource.data.nickname is string &&
+        request.resource.data.nickname.size() > 0 && request.resource.data.nickname.size() <= 30 &&
+        (request.resource.data.photoURL == null || request.resource.data.photoURL is string) &&
+        request.resource.data.bio is string && request.resource.data.bio.size() <= 200 &&
+        request.resource.data.dayCount == 0 &&
+        request.resource.data.createdAt is timestamp;
+      allow update: if isOwner(uid) && (
+        // 프로필 정보는 자유롭게 수정. pushTokens(이 기기의 Expo 푸시 토큰)와
+        // notificationSettings(알림 종류별 on/off)도 본인 계정 안의
+        // 설정값이라 같이 열어준다. nickname/bio 길이나 photoURL 타입을
+        // 검증 안 하면, 화면을 다 깨는 초거대 문자열을 넣거나(다른 사람이
+        // 그 프로필을 볼 때마다 렌더링 비용이 커짐), photoURL을 아무
+        // 외부 주소로나 지정해서 그 프로필을 보는 다른 사람들 기기가
+        // 조용히 그 주소로 요청을 보내게(추적 픽셀처럼 악용) 만들 수
+        // 있었다.
+        (request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['nickname', 'bio', 'photoURL', 'pushTokens', 'notificationSettings', 'locale']) &&
+          validProfileFieldsIfChanged(resource.data, request.resource.data)) ||
+        // dayCount는 통계값이라 클라이언트가 임의 값으로 덮어쓸 수 없게, 실제
+        // 증감 로직(작성/삭제 시 ±1)과 같은 형태의 변화만 허용한다.
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['dayCount']) &&
+          request.resource.data.dayCount >= 0 &&
+          (request.resource.data.dayCount == resource.data.dayCount + 1 ||
+           request.resource.data.dayCount == resource.data.dayCount - 1)) ||
+        // 이용약관·개인정보처리방침 동의 기록(ConsentGate): 아직 동의 안 한
+        // 계정(consentedAt 필드가 아예 없음)에서만 채울 수 있고, 한 번
+        // 채워지면 다시는 못 바꾼다 — 법적 동의 기록이라 사후에 임의로
+        // 조작되면 안 된다. (정확히 request.time과 같아야 한다는 검사까지
+        // 넣고 싶었지만, serverTimestamp()로 쓴 값이 규칙 평가 시점에
+        // 정말 request.time과 같게 취급되는지 이 환경에서 직접 검증할
+        // 방법이 없어서 — 잘못 넣으면 가입한 모든 사람이 이 단계에서
+        // 막혀버리는 위험이 너무 크다 — 타입 검사만 남긴다.)
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['consentedAt']) &&
+          !('consentedAt' in resource.data) &&
+          request.resource.data.consentedAt is timestamp) ||
+        // 펫 보유 수(petCount)도 dayCount와 같은 이유로 클라이언트가 임의
+        // 값을 못 넣게 막는다 — 최대 2마리(가입 시 기본 1 + 미션 보상 1,
+        // constants/pets.ts의 MAX_PETS)까지만 늘어날 수 있고, 한 번에 1씩만
+        // 증가한다. 이 필드가 아직 없는 계정(이 기능 이전 가입자)은 첫
+        // 지급에서 1로 시작한다.
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['petCount']) &&
+          request.resource.data.petCount <= 2 &&
+          ((!('petCount' in resource.data) && request.resource.data.petCount == 1) ||
+           ('petCount' in resource.data && request.resource.data.petCount == resource.data.petCount + 1)))
+      );
+      allow delete: if false;
+
+      match /groups/{groupId} {
+        allow read, write: if isOwner(uid);
+      }
+
+      // 남이 쓴 DAY에 내가 태그됐을 때, "내 연혁에도 추가하기"를 선택하면
+      // 생기는 연결 문서. 실제 DAY 내용을 복사하지 않고 dayId만 들고
+      // 있다가, 내 연혁을 불러올 때 그 dayId를 실제로 다시 읽어서
+      // 합친다(days.ts의 listMyDaysTimeline/listMyDaysInMonth 참고) —
+      // 그래야 원본 게시물이 나중에 수정·삭제되거나 공개범위가 바뀌어도
+      // 항상 "지금" 상태를 정확히 반영한다.
+      match /historyLinks/{dayId} {
+        allow read, delete: if isOwner(uid);
+        // 그 DAY에 실제로 태그된 사람 본인만, 실제로 그 DAY의 작성자가
+        // 맞는 authorId로만 추가할 수 있다 — 아무 dayId나 조작해서 남의
+        // 연혁에 없는 내용을 끼워 넣을 수 없게.
+        allow create: if isOwner(uid) &&
+          request.resource.data.dayId == dayId &&
+          request.resource.data.keys().hasOnly(['dayId', 'authorId', 'addedAt']) &&
+          uid in get(/databases/$(database)/documents/days/$(dayId)).data.taggedFriendUids &&
+          request.resource.data.authorId ==
+            get(/databases/$(database)/documents/days/$(dayId)).data.authorId &&
+          request.resource.data.addedAt is timestamp;
+        allow update: if false;
+      }
+
+      // "내가 쓴 댓글 모아보기" 화면 전용 사본. 실제 댓글(days/{dayId}/
+      // comments/{commentId})을 collectionGroup으로 직접 모아 읽으려 하면,
+      // 그 댓글의 read 규칙이 "지금 이 DAY를 볼 수 있는 사람인지" 확인하러
+      // 매번 부모 DAY까지 조회해야 하는데 Firestore가 collectionGroup
+      // 쿼리에서는 그런 교차 문서 조회가 필요한 규칙을 permission-denied로
+      // 거부한다(likes를 collectionGroup으로 모아볼 때 겪었던 것과 같은
+      // 제약). 그래서 댓글을 작성할 때 이 서브컬렉션에도 내용을 복사해
+      // 두고, 이 화면은 "내 것만" 읽는다 — 교차 문서 조회가 필요 없는
+      // 조건이라 이 제약 자체가 없다.
+      match /myComments/{commentId} {
+        allow read, delete: if isOwner(uid);
+        // addComment()가 실제 댓글 생성과 같은 배치(batch)로 이 문서를
+        // 같이 쓴다 — 배치 안의 각 쓰기는 서로를 아직 못 본 상태로
+        // 독립적으로 검증되므로(같은 배치의 다른 쓰기가 커밋되기 전이라
+        // get()으로 "진짜 댓글이 존재하는지"를 교차 확인하면 타이밍에
+        // 따라 실패할 수 있다), 여기서는 실제 댓글과 대조하지 않고 이
+        // 문서 자체의 형식만 검증한다 — 어차피 본인 소유 서브컬렉션이라
+        // 내용이 틀려도 본인만 잘못된 걸 보게 될 뿐, 다른 사람에게
+        // 영향을 주지 않는다.
+        allow create: if isOwner(uid) &&
+          request.resource.data.commentId == commentId &&
+          request.resource.data.keys().hasOnly(['commentId', 'dayId', 'dayTitle', 'body', 'createdAt']) &&
+          request.resource.data.dayId is string &&
+          request.resource.data.dayTitle is string && request.resource.data.dayTitle.size() <= 40 &&
+          request.resource.data.body is string && request.resource.data.body.size() <= 1000 &&
+          request.resource.data.createdAt is timestamp;
+        allow update: if false;
+      }
+
+      // "내가 좋아요한 DAY 모아보기" 화면 전용 사본 — myComments와 정확히
+      // 같은 이유다. 실측해보니 likes를 collectionGroup으로 모아 읽을 때,
+      // 규칙을 경로 와일드카드(likeUid) 기준으로 두면 쿼리의 where('uid',
+      // '==', uid) 필드 필터와 형태가 달라 증명에 실패하고, 반대로
+      // resource.data.uid 기준(필드 일치)으로 바꿔도 collectionGroup
+      // list 쿼리 자체가 resource.data를 참조하는 규칙을 거부해서 — 그
+      // 어느 쪽으로 규칙을 써도 permission-denied였다(둘 다 직접 재현해서
+      // 확인). 그래서 좋아요를 누를 때 이 서브컬렉션에도 dayId만 같이
+      // 남겨두고, 이 화면은 "내 것만" 읽는다.
+      match /myLikes/{dayId} {
+        allow read, delete: if isOwner(uid);
+        // toggleLike()가 실제 좋아요 문서 쓰기와 같은 트랜잭션으로 이
+        // 문서를 같이 쓴다 — myComments와 같은 이유로 실제 좋아요
+        // 문서와 대조(get)하지 않고 형식만 검증한다.
+        allow create: if isOwner(uid) &&
+          request.resource.data.dayId == dayId &&
+          request.resource.data.keys().hasOnly(['dayId', 'createdAt']) &&
+          request.resource.data.createdAt is timestamp;
+        allow update: if false;
+      }
+
+      // 펫. "펫이 나가있으면(away) 그 펫으론 새 편지를 못 보낸다"가 이
+      // 기능 전체의 유일한 도배 방지 장치라, away -> idle 전환은 여기 규칙에
+      // 아예 없다(=Cloud Function이 Admin SDK로만 할 수 있다 —
+      // functions/index.js의 onLetterReplyCreated/expireOverdueLetters
+      // 참고). idle -> away는 자기 손해만 보는 전환(내가 이 펫을 못 쓰게
+      // 되는 것)이라 클라이언트가 sendLetter() 트랜잭션 안에서 직접 해도
+      // 안전하다.
+      match /pets/{petId} {
+        allow read: if isOwner(uid);
+        allow create: if isOwner(uid) &&
+          request.resource.data.species in ['sparrow', 'owl', 'squirrel', 'turtle'] &&
+          request.resource.data.personality in ['playful', 'timid', 'easygoing', 'careful'] &&
+          request.resource.data.sex in ['male', 'female'] &&
+          request.resource.data.name is string && request.resource.data.name.size() > 0 &&
+          request.resource.data.name.size() <= 20 &&
+          request.resource.data.status == 'idle' &&
+          request.resource.data.currentLetterId == null &&
+          request.resource.data.keys().hasOnly(
+            ['species', 'personality', 'sex', 'name', 'status', 'currentLetterId', 'createdAt']) &&
+          request.resource.data.createdAt is timestamp;
+        allow update: if isOwner(uid) && (
+          (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'currentLetterId']) &&
+            resource.data.status == 'idle' && request.resource.data.status == 'away' &&
+            request.resource.data.currentLetterId is string) ||
+          (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name']) &&
+            request.resource.data.name is string && request.resource.data.name.size() > 0 &&
+            request.resource.data.name.size() <= 20)
+        );
+        allow delete: if false;
+      }
+
+      // "펫 좀 보내줘" 호출. 문서 ID가 (보낸사람,받는사람) 쌍마다 하나로
+      // 고정돼 있어서, 재호출은 create가 아니라 update가 된다 — 그래서
+      // validSummonWrite의 24시간 쿨다운 검사를 update 쪽에만 추가한다.
+      // 삭제를 막아두는 이유는 delete를 허용하면 createdAt(쿨다운 기준
+      // 시각)이 사라져 재호출 제한을 우회할 수 있기 때문이다 — "12시간
+      // 지나면 안 보임"은 클라이언트가 createdAt 기준으로 걸러서 처리한다
+      // (src/data/summons.ts).
+      match /incomingSummons/{fromUid} {
+        allow read: if isOwner(uid);
+        allow delete: if false;
+        allow create: if validSummonWrite(uid, fromUid);
+        allow update: if validSummonWrite(uid, fromUid) &&
+          resource.data.createdAt + duration.value(24, 'h') <= request.time;
+      }
+
+      match /blocked/{blockedUid} {
+        allow read, write: if isOwner(uid);
+      }
+
+      match /friends/{friendUid} {
+        // 이 항목이 가리키는 친구 본인(friendUid)도 자신에 대한 항목
+        // 딱 하나만은 읽을 수 있다 — 클라이언트 코드(data/days.ts의
+        // getFriendRelation)가 "상대가 실제로 나를 친구로 등록해뒀는지",
+        // "상대가 나를 어느 그룹으로 분류해뒀는지"(canReadDayData의
+        // friendGroupId 판단과 동일한 값 — 그룹공개 DAY를 걸러 보여주려면
+        // 클라이언트도 이 값을 알아야 한다)를 확인해야 하기 때문이다.
+        // 문서 경로의 friendUid가 본인 uid와 같을 때만 허용되므로, 이
+        // 서브컬렉션의 다른 친구 항목들은 여전히 소유자만 볼 수 있다.
+        allow read: if isOwner(uid) || isOwner(friendUid);
+        allow write: if isOwner(uid);
+        // 친구 요청을 "수락"하면 상대방(friendUid)이 자기 자신을 내
+        // friends 목록에 등록해야 한다 — 내 서브컬렉션이지만 내가 직접
+        // 쓰는 게 아니라 상대가 쓰는 유일한 경우다. 내가 그 사람에게 보낸
+        // friendRequest가 상대방 쪽에 아직 남아있을 때만(=수락 처리 중)
+        // 허용한다.
+        allow create: if isSignedIn() && request.auth.uid == friendUid &&
+          request.resource.data.friendUid == friendUid &&
+          request.resource.data.keys().hasOnly(['friendUid', 'nickname', 'photoURL', 'groupId', 'groupName', 'createdAt']) &&
+          senderNicknameMatches(request.resource.data.nickname) &&
+          (request.resource.data.photoURL == null || request.resource.data.photoURL is string) &&
+          exists(/databases/$(database)/documents/users/$(request.auth.uid)/friendRequests/$(uid));
+        // 친구 관계를 끊을 땐(그냥 친구 삭제든, 차단이든) 양쪽 문서가 같이
+        // 지워져야 한다. 내 쪽만 지우면 상대방 쪽엔 내가 여전히 "친구"로
+        // 남아서, canReadDayData의 friendOfAuthor 판단(상대방 uid의
+        // friends 서브컬렉션에 내가 있는지로 결정됨)이 그대로 통과해
+        // 반쪽짜리 관계 끊기가 된다. 그래서 "이 문서에 적힌 친구
+        // 본인(friendUid)"도 언제든 자기 자신을 상대방 목록에서 지울 수
+        // 있게 한다 — 친구 요청을 수락할 때 상대가 자기 자신을 등록할 수
+        // 있게 한 것(위 create)과 대칭되는 규칙이다.
+        allow delete: if isOwner(uid) || (isSignedIn() && request.auth.uid == friendUid);
+      }
+
+      match /friendRequests/{fromUid} {
+        // 받은 사람(uid)만 볼 수 있다.
+        allow read: if isOwner(uid);
+        // 받은 사람은 수락(친구 등록 후 삭제) 또는 거절(그냥 삭제)할 수
+        // 있고, 보낸 사람도 마음이 바뀌면 자기가 보낸 요청을 취소할 수 있다.
+        allow delete: if isOwner(uid) || (isSignedIn() && resource.data.fromUid == request.auth.uid);
+        // 보낸 사람이 자기 자신을 지목해서 요청 문서를 만든다. 문서 ID가
+        // fromUid라 같은 사람에게 이미 보낸 대기 중 요청이 있으면(문서가
+        // 이미 존재) create가 아니라 update로 취급돼 아래 규칙에 안 걸리고
+        // 자동으로 막힌다 — 같은 사람한테 중복으로 요청 스팸을 못 보낸다.
+        allow create: if isVerified() && request.auth.uid == fromUid &&
+          request.resource.data.fromUid == fromUid &&
+          request.resource.data.keys().hasOnly(['fromUid', 'fromNickname', 'fromPhotoURL', 'groupId', 'groupName', 'createdAt']) &&
+          senderNicknameMatches(request.resource.data.fromNickname) &&
+          (request.resource.data.fromPhotoURL == null || request.resource.data.fromPhotoURL is string) &&
+          !isBlockedBy(uid, fromUid);
+        allow update: if false;
+      }
+
+      match /notifications/{notificationId} {
+        allow read, update, delete: if isOwner(uid);
+        // 다른 사용자가 태그/댓글/좋아요/친구요청/친구수락 알림을 내
+        // 알림함에 남길 수 있어야 한다. 예전엔 fromNickname/dayTitle을
+        // 보내는 사람이 아무 문자열이나 적어 넣어도 그대로 통과됐다 —
+        // 검증된 계정이 아니어도, 차단당한 사람이어도, "관리자님이
+        // '경고: 계정이 정지됩니다'에 댓글을 남겼어요" 같은 사칭·피싱성
+        // 알림(실제로는 푸시까지 나간다, sendPushOnNotification 참고)을
+        // 아무한테나 무제한으로 보낼 수 있는 구멍이었다. 지금은 이메일
+        // 인증된 계정만, 차단 안 당한 사람만, 실제 프로필 닉네임과 실제
+        // DAY 제목 그대로만 보낼 수 있다.
+        allow create: if isVerified() &&
+          request.resource.data.fromUid == request.auth.uid &&
+          request.resource.data.read == false &&
+          senderNicknameMatches(request.resource.data.fromNickname) &&
+          !isBlockedBy(uid, request.auth.uid) &&
+          (
+            // 예전엔 "닉네임·제목이 진짜인지"만 확인했지, 이 알림이 실제로
+            // 받는 사람(uid)과 관련 있는 사건인지는 전혀 확인하지 않았다 —
+            // 그래서 이메일 인증되고 차단만 안 당한 사람이면, 실제로는 전혀
+            // 상관없는 아무 사용자에게나 "OO님이 [실제로 존재하는 글
+            // 제목]에 댓글을 남겼어요" 같은 알림을(실제 푸시까지 포함해서)
+            // 무제한으로 보낼 수 있었다. 이제 각 종류가 실제로 성립하는
+            // 관계일 때만 통과한다.
+            (request.resource.data.type in ['tag', 'comment', 'like'] &&
+              request.resource.data.keys().hasOnly(['type', 'fromUid', 'fromNickname', 'dayId', 'dayTitle', 'read', 'createdAt']) &&
+              canReadDayData(get(/databases/$(database)/documents/days/$(request.resource.data.dayId)).data) &&
+              request.resource.data.dayTitle ==
+                get(/databases/$(database)/documents/days/$(request.resource.data.dayId)).data.title &&
+              (
+                (request.resource.data.type == 'tag' &&
+                  uid in get(/databases/$(database)/documents/days/$(request.resource.data.dayId)).data.taggedFriendUids) ||
+                (request.resource.data.type in ['comment', 'like'] &&
+                  uid == get(/databases/$(database)/documents/days/$(request.resource.data.dayId)).data.authorId)
+              )) ||
+            // friend_request: 받는 사람(uid)의 friendRequests함에 보낸
+            // 사람(request.auth.uid)이 실제로 보낸 대기 중 요청이 있어야
+            // 한다(friendRequests의 create 규칙이 이미 이걸 검증해서 만든
+            // 문서이므로, 이 알림도 그 진짜 요청과 짝이 맞을 때만 허용).
+            (request.resource.data.type == 'friend_request' &&
+              request.resource.data.keys().hasOnly(['type', 'fromUid', 'fromNickname', 'read', 'createdAt']) &&
+              exists(/databases/$(database)/documents/users/$(uid)/friendRequests/$(request.auth.uid))) ||
+            // friend_accept: 알림을 보내는 사람(수락한 사람, request.auth.uid)의
+            // friends 목록에 받는 사람(uid, 원래 요청을 보냈던 사람)이 이미
+            // 등록돼 있어야 한다 — acceptFriendRequest가 이 문서를 먼저
+            // 만든 뒤에 알림을 보내므로, 진짜 수락한 경우에만 성립한다.
+            (request.resource.data.type == 'friend_accept' &&
+              request.resource.data.keys().hasOnly(['type', 'fromUid', 'fromNickname', 'read', 'createdAt']) &&
+              exists(/databases/$(database)/documents/users/$(request.auth.uid)/friends/$(uid))) ||
+            // pet_summon: 이미 만들어둔 incomingSummons 문서(그 자체가
+            // validSummonWrite로 검증됨)와 짝이 맞을 때만 — 별도 알림
+            // 인프라를 재사용하기 위한 알림함 사본일 뿐, 실제 "호출"
+            // 상태는 incomingSummons 쪽이 진짜다.
+            (request.resource.data.type == 'pet_summon' &&
+              request.resource.data.keys().hasOnly(['type', 'fromUid', 'fromNickname', 'read', 'createdAt']) &&
+              exists(/databases/$(database)/documents/users/$(uid)/incomingSummons/$(request.auth.uid)))
+          );
+      }
+    }
+
+    match /usersByEmail/{emailKey} {
+      // 클라이언트가 이 컬렉션을 직접 읽을 수 있으면, 로그인한 사람이면 누구나
+      // 임의의 이메일을 하나씩 넣어보며 "이 이메일로 가입했는지" 무제한으로
+      // 훑어볼 수 있다(계정 열거). 조회는 이제 분당 호출 횟수를 제한하는
+      // functions/index.js의 findUidByEmail을 통해서만 한다.
+      allow read: if false;
+      allow create: if isSignedIn() &&
+        request.resource.data.uid == request.auth.uid &&
+        request.resource.data.keys().hasOnly(['uid']) &&
+        emailKey == request.auth.token.email.lower();
+      allow update: if false;
+      // 계정 탈퇴 시 본인의 이메일→uid 매핑을 지울 수 있어야 한다(안 그러면
+      // 탈퇴해도 findUidByEmail로 여전히 uid가 조회되고, 그 uid의 프로필
+      // 문서도 남아있어서 "탈퇴"가 사실상 로그인만 막는 것에 그친다).
+      allow delete: if isSignedIn() && resource.data.uid == request.auth.uid;
+    }
+
+    match /reports/{reportId} {
+      // 신고는 접수만 되고, 본인/다른 사용자 누구도 다시 못 읽는다 — 검토는
+      // Firebase 콘솔에서 관리자가 직접 한다(이 앱엔 별도 운영자 화면이
+      // 없다).
+      allow read, update, delete: if false;
+      allow create: if isVerified() &&
+        request.resource.data.reporterUid == request.auth.uid &&
+        request.resource.data.targetType in ['day', 'comment', 'user'] &&
+        request.resource.data.reason in ['spam', 'abuse', 'inappropriate', 'other'] &&
+        request.resource.data.detail is string && request.resource.data.detail.size() <= 500 &&
+        request.resource.data.keys().hasOnly(
+          ['reporterUid', 'targetType', 'targetId', 'targetAuthorUid', 'reason', 'detail', 'createdAt']
+        );
+    }
+
+    // 편지. days처럼 최상위 컬렉션으로 둔다 — likes/myComments를
+    // collectionGroup으로 모아 읽으려다 겪었던 permission-denied 문제(위
+    // myLikes 주석 참고)는 애초에 이렇게 최상위 컬렉션을 fromUid/toUid로
+    // 각각 단일 쿼리할 때는 발생하지 않는다(days가 이미 이 방식으로 문제
+    // 없이 동작 중).
+    match /letters/{letterId} {
+      // 보낸 사람/받는 사람 본인만 읽을 수 있다 — 받은편지함/보낸편지함
+      // 쿼리(where('toUid','==',uid) / where('fromUid','==',uid))가 정확히
+      // 이 조건과 같은 필드를 보므로 list 쿼리도 문제없이 통과한다.
+      allow read: if isSignedIn() &&
+        (resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid);
+      // 서버(functions/index.js의 onLetterCreated/expireOverdueLetters)만
+      // outboundDamage/replyDeadline/status/repliedAt/expiredAt을 채우거나
+      // 바꿀 수 있다 — Admin SDK 쓰기는 규칙 검사를 우회하므로 별도
+      // allow update 없이 여기서는 그냥 막아둔다. 답장은 이 문서를
+      // update하는 게 아니라 아래 reply/{replyId} 서브컬렉션에 별도로
+      // 쓴다(letters/{letterId}/reply/main 참고).
+      allow update, delete: if false;
+      allow create: if isVerified() &&
+        request.resource.data.fromUid == request.auth.uid &&
+        request.resource.data.toUid != request.auth.uid &&
+        senderNicknameMatches(request.resource.data.fromNickname) &&
+        friendOfAuthor(request.resource.data.toUid) &&
+        !isBlockedBy(request.resource.data.toUid, request.auth.uid) &&
+        // 보낸 사람이 실제로 소유한, 지금 idle 상태인 펫으로만 보낼 수
+        // 있다 — away 상태 펫으로 또 보낼 수 있으면 도배 방지 장치가
+        // 무력화된다.
+        get(/databases/$(database)/documents/users/$(request.auth.uid)/pets/$(request.resource.data.fromPetId)).data.status == 'idle' &&
+        request.resource.data.fromPetSpecies ==
+          get(/databases/$(database)/documents/users/$(request.auth.uid)/pets/$(request.resource.data.fromPetId)).data.species &&
+        request.resource.data.fromPetName ==
+          get(/databases/$(database)/documents/users/$(request.auth.uid)/pets/$(request.resource.data.fromPetId)).data.name &&
+        request.resource.data.body is string &&
+        request.resource.data.body.size() > 0 && request.resource.data.body.size() <= 2000 &&
+        request.resource.data.toNickname is string && request.resource.data.toNickname.size() <= 30 &&
+        (request.resource.data.toPhotoURL == null || request.resource.data.toPhotoURL is string) &&
+        // fromPhotoURL은 타입만 확인하면 끝이 아니라 실제 프로필 사진과
+        // 정확히 같아야 한다 — 안 그러면 발신자가 아무 외부 주소나(추적
+        // 픽셀 등) 적어 넣어도 받는 사람 화면에 그대로 이미지로 렌더링되는
+        // 구멍이 생긴다(자기 프로필 사진 자체를 바꾸는 것보다 훨씬 은밀하게
+        // 특정 상대 한 명만 노려서 악용할 수 있어 더 위험하다).
+        request.resource.data.fromPhotoURL ==
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.photoURL &&
+        request.resource.data.waitHours is int &&
+        request.resource.data.waitHours >= 1 && request.resource.data.waitHours <= 72 &&
+        request.resource.data.status == 'awaiting_reply' &&
+        request.resource.data.replyDeadline == null &&
+        request.resource.data.outboundDamage == null &&
+        request.resource.data.repliedAt == null &&
+        request.resource.data.expiredAt == null &&
+        request.resource.data.keys().hasOnly([
+          'fromUid', 'fromNickname', 'fromPhotoURL', 'fromPetId', 'fromPetSpecies', 'fromPetName',
+          'toUid', 'toNickname', 'toPhotoURL', 'body', 'waitHours', 'replyDeadline', 'outboundDamage',
+          'status', 'createdAt', 'repliedAt', 'expiredAt'
+        ]) &&
+        request.resource.data.createdAt is timestamp;
+
+      // 답장. 문서 ID를 'main' 하나로 고정해서 두 번째 답장 시도는 자동으로
+      // (create가 아니라) update가 되어 거부된다 — friendRequests를
+      // 상대당 문서 1개로 두는 것과 같은 트릭. damage는 서버(Admin SDK)만
+      // 채운다.
+      match /reply/{replyId} {
+        allow read: if isSignedIn() &&
+          (get(/databases/$(database)/documents/letters/$(letterId)).data.fromUid == request.auth.uid ||
+           get(/databases/$(database)/documents/letters/$(letterId)).data.toUid == request.auth.uid);
+        allow update, delete: if false;
+        allow create: if isSignedIn() && replyId == 'main' &&
+          request.auth.uid == get(/databases/$(database)/documents/letters/$(letterId)).data.toUid &&
+          get(/databases/$(database)/documents/letters/$(letterId)).data.status == 'awaiting_reply' &&
+          request.time <= get(/databases/$(database)/documents/letters/$(letterId)).data.replyDeadline &&
+          request.resource.data.body is string &&
+          request.resource.data.body.size() > 0 && request.resource.data.body.size() <= 2000 &&
+          request.resource.data.damage == null &&
+          request.resource.data.keys().hasOnly(['body', 'damage', 'createdAt']) &&
+          request.resource.data.createdAt is timestamp;
+      }
+    }
+
+    match /days/{dayId} {
+      allow read: if canReadDayData(resource.data);
+
+      // 작성 시간 제한: 서버 시간(request.time) 기준으로 해당 날짜 00:00(KST)부터
+      // 다음날 10:00(KST, 34시간 후)까지만 생성 가능. 기기 시간 변경으로 우회 불가.
+      // 단, 아직 오지 않은 미래 날짜는 "예정(draft)"으로만 만들 수 있다 —
+      // 이 경우 위 시간 창 검사 대신 "날짜가 미래여야 한다"만 확인한다.
+      // (나중에 그 날짜가 되면 confirmDay로 확정해야 진짜 기록이 된다.)
+      allow create: if isVerified() &&
+        // 예전엔 여기 나열한 필드들만 형식을 검사했을 뿐, 문서 전체를
+        // 이 키 집합으로 제한하지는 않았다 — 그래서 클라이언트 UI를 거치지
+        // 않고 직접 쓰면 fontKey/visibility/moodTag 같은 다른 필드에
+        // 검증되지 않은 값(예: FONT_PRESETS에 없는 키)을 얼마든지 끼워
+        // 넣을 수 있었고, 그런 DAY를 열어보는 다른 모든 사람의 화면이
+        // 그 값 때문에 깨질 수 있었다(예: fontKey가 이상한 문자열이면
+        // FONT_PRESETS[fontKey]가 undefined가 되어 렌더링이 그대로 죽는다).
+        request.resource.data.keys().hasOnly([
+          'authorId', 'authorNickname', 'authorPhotoURL', 'date', 'dateLabel', 'title', 'contentBlocks',
+          'photoURLs', 'photoAspects', 'visibility', 'groupId', 'taggedFriendUids', 'taggedFriendNicknames',
+          'moodTag', 'location', 'fontKey', 'textAlign', 'inWorldFeed', 'inHistory', 'likeCount',
+          'commentCount', 'editCount', 'status', 'createdAt', 'updatedAt', 'deleted'
+        ]) &&
+        request.resource.data.authorId == request.auth.uid &&
+        (request.resource.data.authorPhotoURL == null || request.resource.data.authorPhotoURL is string) &&
+        request.resource.data.dateLabel is string &&
+        // authorNickname은 성능을 위해 DAY 문서에 복사해두는 값이라, 검증
+        // 안 하면 실제 프로필과 다른(사칭성) 이름을 박아넣을 수 있었다
+        // (지금은 화면에서 항상 최신 프로필로 덮어써서 보여주기는 하지만,
+        // 애초에 저장 시점부터 정확하게 강제하는 게 더 안전하다).
+        senderNicknameMatches(request.resource.data.authorNickname) &&
+        request.resource.data.title is string && request.resource.data.title.size() > 0 &&
+        request.resource.data.title.size() <= 40 &&
+        request.resource.data.contentBlocks is list && request.resource.data.contentBlocks.size() <= 50 &&
+        request.resource.data.date is timestamp &&
+        request.resource.data.likeCount == 0 &&
+        request.resource.data.commentCount == 0 &&
+        request.resource.data.editCount == 0 &&
+        request.resource.data.deleted == false &&
+        request.resource.data.photoURLs is list && request.resource.data.photoURLs.size() <= 3 &&
+        request.resource.data.photoAspects is list &&
+        request.resource.data.photoAspects.size() == request.resource.data.photoURLs.size() &&
+        request.resource.data.taggedFriendUids is list && request.resource.data.taggedFriendUids.size() <= 20 &&
+        request.resource.data.taggedFriendNicknames.size() == request.resource.data.taggedFriendUids.size() &&
+        request.resource.data.visibility in ['public', 'friends', 'group', 'private'] &&
+        (request.resource.data.groupId == null || request.resource.data.groupId is string) &&
+        (request.resource.data.moodTag == null ||
+          request.resource.data.moodTag in
+            ['happy', 'grateful', 'excited', 'calm', 'proud', 'longing', 'sad', 'angry', 'anxious', 'tired']) &&
+        (request.resource.data.location == null || (
+          request.resource.data.location is map &&
+          request.resource.data.location.lat is number &&
+          request.resource.data.location.lng is number &&
+          request.resource.data.location.name is string
+        )) &&
+        request.resource.data.fontKey in [
+          'gowun', 'nanum', 'jua', 'doHyeon', 'blackHanSans', 'gaegu',
+          'hiMelody', 'poorStory', 'nanumPen', 'nanumBrush', 'eastSeaDokdo', 'songMyung'
+        ] &&
+        request.resource.data.textAlign in ['left', 'center', 'right'] &&
+        request.resource.data.inWorldFeed is bool &&
+        request.resource.data.inHistory is bool &&
+        request.resource.data.updatedAt is timestamp &&
+        (
+          (request.resource.data.status == 'confirmed' &&
+            request.time >= request.resource.data.date &&
+            request.time <= request.resource.data.date + duration.value(34, 'h')) ||
+          (request.resource.data.status == 'draft' &&
+            request.resource.data.date > request.time)
+        );
+
+      // 작성자 본인의 수정은 "필드 화이트리스트" 방식으로 제한한다. 예전에는
+      // authorId/likeCount/commentCount/createdAt만 막는 블랙리스트였는데, 그
+      // 방식이면 date/dateLabel/photoURLs 같은 필드는 얼마든지 고칠 수 있어서
+      // 작성 시간 제한(위 create 규칙)을 생성 이후에 update로 우회할 수 있었다.
+      // 지금은 실제로 수정 화면에서 건드리는 필드만 정확히 열어준다.
+      allow update: if isSignedIn() && (
+        // 공개범위(공개범위·그룹)와 노출 스위치(월드데이·연혁)는 확정된
+        // DAY에 한해 시간 제한 없이 바꿀 수 있다. 예정(draft) 상태인
+        // 동안은 어차피 canReadDayData가 작성자 본인 외엔 못 읽게 막아
+        // 두었으니, 그 안에서 공개범위를 미리 바꿔봐야 의미가 없을뿐더러
+        // 확정 시점의 "그날 무엇을 공개할지" 판단을 흐릴 수 있어 아예
+        // 확정 후로 미룬다.
+        (resource.data.authorId == request.auth.uid &&
+          resource.data.status == 'confirmed' &&
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['visibility', 'groupId', 'inWorldFeed', 'inHistory', 'updatedAt']) &&
+          request.resource.data.visibility in ['public', 'friends', 'group', 'private'] &&
+          (request.resource.data.groupId == null || request.resource.data.groupId is string) &&
+          request.resource.data.inWorldFeed is bool &&
+          request.resource.data.inHistory is bool) ||
+        // 함께한 사람(친구 태그)은 draft든 confirmed든 언제나 수정 가능 —
+        // 공개범위와 달리 "누구와 함께했는지" 기록은 확정 여부와 무관하다.
+        (resource.data.authorId == request.auth.uid &&
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['taggedFriendUids', 'taggedFriendNicknames', 'updatedAt']) &&
+          request.resource.data.taggedFriendUids is list && request.resource.data.taggedFriendUids.size() <= 20 &&
+          request.resource.data.taggedFriendNicknames.size() == request.resource.data.taggedFriendUids.size()) ||
+        // 내용(제목/본문/기분/위치)은 작성 후 24시간 안에만 고칠 수 있고,
+        // 고칠 때마다 editCount가 정확히 1씩 늘어나야 한다(그래야 "수정됨 N"
+        // 배지를 신뢰할 수 있다 — 클라이언트가 원하는 값으로 못 덮어씀).
+        (resource.data.authorId == request.auth.uid &&
+          request.time <= resource.data.createdAt + duration.value(24, 'h') &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(
+            ['title', 'contentBlocks', 'moodTag', 'location', 'fontKey', 'textAlign', 'editCount', 'updatedAt']
+          ) &&
+          request.resource.data.title is string && request.resource.data.title.size() > 0 &&
+          request.resource.data.title.size() <= 40 &&
+          request.resource.data.contentBlocks is list && request.resource.data.contentBlocks.size() <= 50 &&
+          // create 규칙과 같은 이유로 여기서도 검증한다 — 안 그러면 생성
+          // 직후 24시간 안에 이 필드들을 다시 고쳐서 create의 검증을
+          // 그대로 우회할 수 있었다.
+          (request.resource.data.moodTag == null ||
+            request.resource.data.moodTag in
+            ['happy', 'grateful', 'excited', 'calm', 'proud', 'longing', 'sad', 'angry', 'anxious', 'tired']) &&
+          (request.resource.data.location == null || (
+            request.resource.data.location is map &&
+            request.resource.data.location.lat is number &&
+            request.resource.data.location.lng is number &&
+            request.resource.data.location.name is string
+          )) &&
+          request.resource.data.fontKey in [
+            'gowun', 'nanum', 'jua', 'doHyeon', 'blackHanSans', 'gaegu',
+            'hiMelody', 'poorStory', 'nanumPen', 'nanumBrush', 'eastSeaDokdo', 'songMyung'
+          ] &&
+          request.resource.data.textAlign in ['left', 'center', 'right'] &&
+          request.resource.data.editCount ==
+            (('editCount' in resource.data) ? resource.data.editCount : 0) + 1) ||
+        // 소프트 삭제: 작성자가 deleted를 true로만 바꿀 수 있다(되살리기 불가).
+        (resource.data.authorId == request.auth.uid &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deleted', 'updatedAt']) &&
+          request.resource.data.deleted == true) ||
+        // 예정(draft) 확정: 그 날짜 00:00 KST ~ 다음날 오전 10시 사이에만,
+        // status를 draft -> confirmed로만 바꿀 수 있다(되돌리기 불가,
+        // 기한을 넘기면 이 조건 자체가 거짓이 되어 영영 확정 못 한다).
+        (resource.data.authorId == request.auth.uid &&
+          resource.data.status == 'draft' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+          request.resource.data.status == 'confirmed' &&
+          request.time >= resource.data.date &&
+          request.time <= resource.data.date + duration.value(34, 'h')) ||
+        // 좋아요/댓글 수 카운터: 이 DAY를 읽을 수 있는 사람이면 누구나 갱신할 수
+        // 있어야 하지만, 임의 값이 아니라 실제 like/comment 문서 생성·삭제와
+        // 짝이 맞는 ±1 증감만 허용한다(그 전에는 누구든 원하는 숫자로 덮어쓸 수
+        // 있는 IDOR/변조 취약점이 있었다).
+        (canReadDayData(resource.data) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likeCount']) &&
+          request.resource.data.likeCount >= 0 &&
+          (request.resource.data.likeCount == resource.data.likeCount + 1 ||
+           request.resource.data.likeCount == resource.data.likeCount - 1)) ||
+        (canReadDayData(resource.data) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['commentCount']) &&
+          request.resource.data.commentCount >= 0 &&
+          (request.resource.data.commentCount == resource.data.commentCount + 1 ||
+           request.resource.data.commentCount == resource.data.commentCount - 1))
+      );
+
+      allow delete: if false; // 소프트 삭제(update)만 허용
+
+      match /likes/{likeUid} {
+        // "내가 좋아요한 DAY 목록"은 이제 collectionGroup으로 여기를 직접
+        // 모아 읽지 않고 users/{uid}/myLikes 사본을 읽는다(위 myLikes 주석
+        // 참고 — 이 컬렉션을 collectionGroup으로 모아 읽으려 하면 규칙을
+        // 어느 형태로 써도 permission-denied였다). 그래서 이 read 규칙은
+        // toggleLike()가 "아직 안 눌렀는지" 확인하려고 내 좋아요 문서
+        // 하나를 get()하는 것만 지원하면 되고, resource.data를 참조할
+        // 필요 없이 경로(likeUid)만 봐도 충분하다.
+        allow read: if isSignedIn() && request.auth.uid == likeUid;
+        // 댓글처럼, 작성자가 차단한 사람은 좋아요도 못 남기게 한다 — 예전엔
+        // 댓글만 이 검사를 했고 좋아요는 빠져 있어서, 차단당한 사람이 여전히
+        // 좋아요(및 그로 인한 알림)를 남길 수 있는 비대칭이 있었다.
+        // isVerified()(이메일 인증)도 이 앱의 다른 모든 쓰기(DAY 작성, 댓글,
+        // 친구요청, 신고 등)와 같은 기준으로 맞춘다 — 예전엔 로그인만 하면
+        // (이메일 인증 없이) 좋아요를 남길 수 있어서, 이메일 인증 없이 무제한
+        // 만들 수 있는 가짜 계정들로 특정 게시물의 좋아요 수를 조작할 수
+        // 있는 구멍이었다.
+        allow create: if isVerified() && request.auth.uid == likeUid && request.resource.data.uid == likeUid &&
+          canReadDayData(get(/databases/$(database)/documents/days/$(dayId)).data) &&
+          !isBlockedBy(get(/databases/$(database)/documents/days/$(dayId)).data.authorId, request.auth.uid);
+        allow delete: if isSignedIn() && request.auth.uid == likeUid;
+        allow update: if false;
+      }
+
+      match /comments/{commentId} {
+        allow read: if canReadDayData(get(/databases/$(database)/documents/days/$(dayId)).data);
+        allow create: if isVerified() &&
+          request.resource.data.authorId == request.auth.uid &&
+          request.resource.data.keys().hasOnly(['authorId', 'authorNickname', 'authorPhotoURL', 'body', 'createdAt']) &&
+          senderNicknameMatches(request.resource.data.authorNickname) &&
+          (request.resource.data.authorPhotoURL == null || request.resource.data.authorPhotoURL is string) &&
+          request.resource.data.body is string && request.resource.data.body.size() > 0 &&
+          request.resource.data.body.size() <= 1000 &&
+          canReadDayData(get(/databases/$(database)/documents/days/$(dayId)).data) &&
+          !isBlockedBy(get(/databases/$(database)/documents/days/$(dayId)).data.authorId, request.auth.uid);
+        allow update: if false;
+        allow delete: if isSignedIn() && resource.data.authorId == request.auth.uid;
+      }
+    }
+  }
+}

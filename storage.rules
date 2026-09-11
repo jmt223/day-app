@@ -1,0 +1,54 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // DAY 첨부 사진(신규): days/{uid}/{dayId}/{fileName}.
+    //
+    // 예전엔 여기서도 "공개범위를 아는 만큼" 열람을 허용해보려 했는데
+    // (Storage 규칙은 friends/group처럼 뷰어별 관계를 실시간으로 확인 못 하고,
+    // 다운로드 URL도 한번 발급되면 규칙과 무관하게 계속 유효하다는 두 가지
+    // 근본적 한계가 있었다), 지금은 그 방식을 아예 버렸다. 열람은 무조건
+    // functions/index.js의 servePhoto Cloud Function을 통해서만 이루어지고,
+    // 그 함수가 매 요청마다 Firestore의 "지금" 상태로 권한을 판단한 뒤 관리자
+    // 권한(Admin SDK, 이 규칙과 무관)으로 직접 서빙한다. 그래서 클라이언트
+    // SDK/공개 URL을 통한 직접 열람은 통째로 막는다 — 업로드(쓰기)만 본인
+    // 소유 경로에 대해 허용.
+    match /days/{uid}/{dayId}/{fileName} {
+      allow read: if false;
+      // DAY 문서 자체는 Firestore 규칙상 이메일 인증된 계정만 만들 수 있는데,
+      // 사진 업로드가 이 검사 없이 열려 있으면 인증 안 한 계정도(실제로 쓸
+      // 곳 없는) 사진을 무제한으로 올려 스토리지 용량을 낭비할 수 있었다.
+      allow create, update: if request.auth != null && request.auth.uid == uid
+        && request.auth.token.email_verified == true
+        && request.resource.size < 10 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+      allow delete: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // 예전 평면 경로(days/{uid}/{fileName}). dayId가 없어서 servePhoto 함수도
+    // "로그인만 하면 열람 가능" 수준으로만 판단한다 — 이 규칙도 동일한 수준을
+    // 유지한다(신규 업로드는 전부 위 경로를 쓰므로 여기엔 새로 안 쌓인다).
+    match /days/{uid}/{fileName} {
+      allow read: if request.auth != null;
+      // 위 신규 경로와 같은 이메일 인증 요건을 여기도 걸어둔다 — 새 코드는
+      // 이 평면 경로에 더 이상 안 쓰지만, 규칙만 놓고 보면 이 경로는 여전히
+      // 쓸 수 있게 열려 있다. 신규 경로만 인증을 요구하고 여기를 그대로
+      // 두면, 인증 안 한 계정이 그냥 이 경로로 올려서 그 제한을 통째로
+      // 우회할 수 있었다.
+      allow create, update: if request.auth != null && request.auth.uid == uid
+        && request.auth.token.email_verified == true
+        && request.resource.size < 10 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+      allow delete: if request.auth != null && request.auth.uid == uid;
+    }
+
+    match /avatars/{uid}/{fileName} {
+      allow read: if request.auth != null;
+      allow create, update: if request.auth != null && request.auth.uid == uid
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+      allow delete: if request.auth != null && request.auth.uid == uid;
+    }
+  }
+}
