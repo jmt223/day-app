@@ -1,12 +1,23 @@
 const { onRequest } = require('firebase-functions/v2/https');
-const { onDocumentCreated } = require('firebase-functions/v2/firestore');
+const { onDocumentCreated, onDocumentWritten } = require('firebase-functions/v2/firestore');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const admin = require('firebase-admin');
+// FieldValue는 모듈 경로(firebase-admin/firestore)에서 가져온다 — 예전처럼
+// admin 네임스페이스로 접근하면 에뮬레이터 런타임에선 undefined라서, 로컬
+// 에뮬레이터로 함수를 테스트할 수가 없었다.
+const { FieldValue } = require('firebase-admin/firestore');
 
 admin.initializeApp({ storageBucket: 'day-app-6e618.firebasestorage.app' });
 
 const db = admin.firestore();
 const bucket = admin.storage().bucket();
+
+const { createRulesLoader } = require('./pet-config');
+const { ActionError, createLettersCore } = require('./letters-core');
+const { withJosa } = require('./pet-logic');
+
+const getPetRules = createRulesLoader(db);
+const lettersCore = createLettersCore({ db, getRules: getPetRules });
 
 /**
  * 아주 단순한 인메모리 슬라이딩 윈도우 rate limiter.
@@ -43,6 +54,9 @@ const photoRateLimit = createRateLimiter({ windowMs: 60_000, max: 120 }); // 분
 const emailLookupRateLimit = createRateLimiter({ windowMs: 60_000, max: 10 }); // 분당 10회
 // 로그인 전(=아직 uid가 없는) 요청이라 IP 기준으로 제한한다.
 const kakaoAuthRateLimit = createRateLimiter({ windowMs: 60_000, max: 10 }); // 분당 10회
+// 펫 행동(회수/쓰다듬기/간식/재문의). 정상 사용은 분당 몇 번이면 충분하다 —
+// 특히 "일로 와"로 회수했다가 바로 다시 보내는 도배를 이걸로 누른다.
+const petActionRateLimit = createRateLimiter({ windowMs: 60_000, max: 30 }); // 분당 30회
 
 async function verifyBearer(req) {
   const authHeader = req.get('Authorization') || '';
@@ -214,8 +228,9 @@ async function isAuthorized({ requesterUid, authorUid, dayId }) {
   return friendSnap.data().groupId === day.groupId;
 }
 
-// 알림 종류를 사용자가 알림 설정 화면에서 끄고 켜는 5개 카테고리로 묶는다.
-// friend_request/friend_accept는 둘 다 "친구 알림" 하나로 취급한다.
+// 알림 종류를 사용자가 알림 설정 화면에서 끄고 켜는 6개 카테고리로 묶는다.
+// friend_request/friend_accept는 둘 다 "친구 알림", 펫 편지 관련은 전부
+// "편지 알림" 하나로 취급한다.
 const NOTIFICATION_CATEGORY = {
   tag: 'tag',
   comment: 'comment',
@@ -227,37 +242,58 @@ const NOTIFICATION_CATEGORY = {
   letter_replied: 'letter',
   letter_expired: 'letter',
   pet_summon: 'letter',
+  summon_accepted: 'letter',
+  pet_early_return: 'letter',
+  pet_overstay: 'letter',
+  letter_reask: 'letter',
 };
 
 // 클라이언트 src/i18n/translations.ts의 notifications.* 키와 같은 문구다.
 // Cloud Functions는 클라이언트 번들과 별도로 배포되는 독립 코드라 그
-// 파일을 그대로 가져다 쓸 수 없어서, 여기서만 쓰는 알림 6종 문구만 따로
-// 복사해둔다 — 문구를 바꾸면 양쪽 다 맞춰줘야 한다.
+// 파일을 그대로 가져다 쓸 수 없어서, 푸시 문구만 따로 복사해둔다 — 문구를
+// 바꾸면 양쪽 다 맞춰줘야 한다.
 const PUSH_MESSAGES = {
   ko: {
-    tag: (n, d) => `${n}님이 '${d}'에 회원님을 태그했어요`,
-    comment: (n, d) => `${n}님이 '${d}'에 댓글을 남겼어요`,
-    like: (n, d) => `${n}님이 '${d}'을 좋아해요`,
-    friend_request: (n) => `${n}님이 친구 요청을 보냈어요`,
-    friend_accept: (n) => `${n}님이 친구 요청을 수락했어요`,
-    memory: (n, d, years) => `${years}년 전 오늘, '${d}'을 기록했어요`,
-    letter_received: (n) => `${n}님의 펫이 편지를 물고 왔어요`,
-    letter_replied: (n) => `${n}님이 답장을 보냈어요`,
-    letter_expired: (n) => `${n}님에게 보낸 편지가 답장 없이 돌아왔어요`,
-    pet_summon: (n) => `${n}님이 펫을 보내달라고 해요`,
+    tag: (n) => `${n.fromNickname}님이 '${n.dayTitle}'에 회원님을 태그했어요`,
+    comment: (n) => `${n.fromNickname}님이 '${n.dayTitle}'에 댓글을 남겼어요`,
+    like: (n) => `${n.fromNickname}님이 '${n.dayTitle}'을 좋아해요`,
+    friend_request: (n) => `${n.fromNickname}님이 친구 요청을 보냈어요`,
+    friend_accept: (n) => `${n.fromNickname}님이 친구 요청을 수락했어요`,
+    memory: (n) => `${n.yearsAgo}년 전 오늘, '${n.dayTitle}'을 기록했어요`,
+    letter_received: (n) =>
+      n.petName
+        ? `${n.fromNickname}님의 ${withJosa(n.petName, '이/가')} 편지를 물고 왔어요`
+        : `${n.fromNickname}님의 펫이 편지를 물고 왔어요`,
+    letter_replied: (n) => `${n.fromNickname}님이 답장을 보냈어요`,
+    letter_expired: (n) =>
+      n.petName
+        ? `${withJosa(n.petName, '이/가')} ${n.fromNickname}님의 답장을 못 받고 돌아왔어요`
+        : `${n.fromNickname}님에게 보낸 편지가 답장 없이 돌아왔어요`,
+    pet_summon: (n) => `${n.fromNickname}님이 펫을 보내달라고 해요`,
+    summon_accepted: (n) => `${n.fromNickname}님이 ${withJosa(n.petName || '펫', '을/를')} 보내줬어요. 답장을 실어 보내세요`,
+    pet_early_return: (n) => `${withJosa(n.petName || '펫', '이/가')} 기다리다 먼저 돌아왔어요`,
+    pet_overstay: (n) => `${withJosa(n.petName || '펫', '이/가')} ${n.fromNickname}님 곁에 계속 머물고 있어요`,
+    letter_reask: (n) => `${n.fromNickname}님이 "뭐라고 했어?" 하고 물어봐요`,
     default: () => '새 알림이 있어요',
   },
   en: {
-    tag: (n, d) => `${n} tagged you in '${d}'`,
-    comment: (n, d) => `${n} commented on '${d}'`,
-    like: (n, d) => `${n} liked '${d}'`,
-    friend_request: (n) => `${n} sent you a friend request`,
-    friend_accept: (n) => `${n} accepted your friend request`,
-    memory: (n, d, years) => `${years} year(s) ago today, you recorded '${d}'`,
-    letter_received: (n) => `${n}'s pet brought you a letter`,
-    letter_replied: (n) => `${n} replied to your letter`,
-    letter_expired: (n) => `Your letter to ${n} came back unanswered`,
-    pet_summon: (n) => `${n} is asking you to send your pet`,
+    tag: (n) => `${n.fromNickname} tagged you in '${n.dayTitle}'`,
+    comment: (n) => `${n.fromNickname} commented on '${n.dayTitle}'`,
+    like: (n) => `${n.fromNickname} liked '${n.dayTitle}'`,
+    friend_request: (n) => `${n.fromNickname} sent you a friend request`,
+    friend_accept: (n) => `${n.fromNickname} accepted your friend request`,
+    memory: (n) => `${n.yearsAgo} year(s) ago today, you recorded '${n.dayTitle}'`,
+    letter_received: (n) => `${n.fromNickname}'s ${n.petName || 'pet'} brought you a letter`,
+    letter_replied: (n) => `${n.fromNickname} replied to your letter`,
+    letter_expired: (n) =>
+      n.petName
+        ? `${n.petName} came back without a reply from ${n.fromNickname}`
+        : `Your letter to ${n.fromNickname} came back unanswered`,
+    pet_summon: (n) => `${n.fromNickname} is asking you to send your pet`,
+    summon_accepted: (n) => `${n.fromNickname} sent ${n.petName || 'a pet'} over. Send your message with it`,
+    pet_early_return: (n) => `${n.petName || 'Your pet'} got tired of waiting and came back early`,
+    pet_overstay: (n) => `${n.petName || 'Your pet'} is still staying with ${n.fromNickname}`,
+    letter_reask: (n) => `${n.fromNickname} asked, "What did you say?"`,
     default: () => 'You have a new notification',
   },
 };
@@ -267,14 +303,19 @@ const PUSH_MESSAGES = {
 function pushMessageFor(notification, userLocale) {
   const messages = PUSH_MESSAGES[userLocale] || PUSH_MESSAGES.ko;
   const build = messages[notification.type] || messages.default;
-  return build(notification.fromNickname, notification.dayTitle, notification.yearsAgo);
+  return build(notification);
 }
 
 /**
- * users/{uid}/notifications/{notificationId} 문서가 새로 생기면(좋아요/댓글/
- * 태그/친구요청/친구수락), 그 알림 주인(uid)에게 실제 기기 푸시를 보낸다.
- * 인앱 알림함(client의 sendNotification)은 항상 기록되고, 이 함수는 그중
- * "이 사람이 이 종류의 알림을 푸시로도 받기로 했는지"만 추가로 판단한다.
+ * users/{uid}/notifications/{notificationId} 문서가 새로 생기면, 그 알림
+ * 주인(uid)에게 실제 기기 푸시를 보낸다. 인앱 알림함은 항상 기록되고, 이
+ * 함수는 그중 "이 사람이 이 종류의 알림을 푸시로도 받기로 했는지"만 추가로
+ * 판단한다.
+ *
+ * 푸시 토큰은 users/{uid}/private/push 문서에 있다(본인만 읽을 수 있음).
+ * 예전엔 누구나 읽을 수 있는 users/{uid} 문서의 pushTokens 필드에 있어서,
+ * 로그인한 아무나 다른 사람 토큰을 가져가 Expo 푸시 API로 가짜 알림을 보낼 수
+ * 있었다 — 옮기기 전 토큰도 계속 받도록 예전 필드도 같이 읽는다.
  */
 exports.sendPushOnNotification = onDocumentCreated(
   { document: 'users/{uid}/notifications/{notificationId}', region: 'asia-northeast3' },
@@ -286,7 +327,9 @@ exports.sendPushOnNotification = onDocumentCreated(
     const category = NOTIFICATION_CATEGORY[notification.type];
     if (!category) return;
 
-    const userSnap = await db.doc(`users/${uid}`).get();
+    const userRef = db.doc(`users/${uid}`);
+    const pushRef = db.doc(`users/${uid}/private/push`);
+    const [userSnap, pushSnap] = await Promise.all([userRef.get(), pushRef.get()]);
     if (!userSnap.exists) return;
     const userData = userSnap.data();
 
@@ -295,7 +338,9 @@ exports.sendPushOnNotification = onDocumentCreated(
     // 생기기 전에 가입한 계정도 계속 알림을 받아야 하기 때문이다.
     if (settings[category] === false) return;
 
-    const tokens = Array.isArray(userData.pushTokens) ? userData.pushTokens : [];
+    const privateTokens = pushSnap.exists && Array.isArray(pushSnap.data().tokens) ? pushSnap.data().tokens : [];
+    const legacyTokens = Array.isArray(userData.pushTokens) ? userData.pushTokens : [];
+    const tokens = Array.from(new Set([...privateTokens, ...legacyTokens]));
     if (tokens.length === 0) return;
 
     const body = pushMessageFor(notification, userData.locale);
@@ -303,7 +348,12 @@ exports.sendPushOnNotification = onDocumentCreated(
       to: token,
       title: 'DAY',
       body,
-      data: { type: notification.type, dayId: notification.dayId || null, letterId: notification.letterId || null },
+      data: {
+        type: notification.type,
+        dayId: notification.dayId || null,
+        letterId: notification.letterId || null,
+        fromUid: notification.fromUid || null,
+      },
     }));
 
     try {
@@ -322,9 +372,11 @@ exports.sendPushOnNotification = onDocumentCreated(
         .map((ticket, i) => (ticket.status === 'error' && ticket.details?.error === 'DeviceNotRegistered' ? tokens[i] : null))
         .filter(Boolean);
       if (deadTokens.length > 0) {
-        await db.doc(`users/${uid}`).update({
-          pushTokens: admin.firestore.FieldValue.arrayRemove(...deadTokens),
-        });
+        const remove = FieldValue.arrayRemove(...deadTokens);
+        await Promise.all([
+          pushSnap.exists ? pushRef.update({ tokens: remove }) : null,
+          legacyTokens.length > 0 ? userRef.update({ pushTokens: remove }) : null,
+        ]);
       }
     } catch (err) {
       console.error('sendPushOnNotification error', err);
@@ -384,7 +436,7 @@ exports.sendMemoryNotifications = onSchedule(
           dayTitle: day.title,
           yearsAgo,
           read: false,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          createdAt: FieldValue.serverTimestamp(),
         });
       } catch (err) {
         console.error('sendMemoryNotifications: failed for', docSnap.id, err);
@@ -393,174 +445,173 @@ exports.sendMemoryNotifications = onSchedule(
   }
 );
 
-// 손상 확률 표. src/constants/pets.ts에 있는 값과 반드시 숫자를 맞춰야
-// 한다(클라이언트 번들과 별도로 배포되는 독립 코드라 import로 공유할 수
-// 없다 — 위 PUSH_MESSAGES와 같은 이유). 사용자와 "일단 합리적인 기본값,
-// 나중에 조정"으로 합의된 값이라 실제 손상 롤은 여기(서버)에서만 한다 —
-// pet.status(idle/away)가 이 기능의 유일한 도배 방지 장치라 클라이언트가
-// 굴리게 두면 나쁜 롤을 스스로 조작할 수 있다.
-const PET_SPECIES_BASE_DAMAGE_PERCENT = { sparrow: 8, owl: 5, squirrel: 12, turtle: 3 };
-const PET_PERSONALITY_DAMAGE_MODIFIER_PERCENT = { playful: 4, timid: 2, easygoing: -2, careful: -4 };
-const DAMAGE_LEVEL_WEIGHTS = [
-  ['corner', 60],
-  ['half', 30],
-  ['total', 10],
-];
+// ---------------------------------------------------------------------------
+// 펫 편지. 실제 로직은 letters-core.js에 있고(에뮬레이터에서 직접 불러
+// 테스트할 수 있게 분리), 여기서는 트리거/스케줄/HTTP에 연결만 한다.
+// ---------------------------------------------------------------------------
 
-function damageProbabilityPercent(species, personality) {
-  const base = PET_SPECIES_BASE_DAMAGE_PERCENT[species] ?? 8;
-  const modifier = PET_PERSONALITY_DAMAGE_MODIFIER_PERCENT[personality] ?? 0;
-  return Math.min(25, Math.max(1, base + modifier));
-}
-
-function rollDamageLevel(species, personality) {
-  const probability = damageProbabilityPercent(species, personality);
-  if (Math.random() * 100 >= probability) return 'none';
-  const totalWeight = DAMAGE_LEVEL_WEIGHTS.reduce((sum, [, weight]) => sum + weight, 0);
-  let roll = Math.random() * totalWeight;
-  for (const [level, weight] of DAMAGE_LEVEL_WEIGHTS) {
-    if (roll < weight) return level;
-    roll -= weight;
-  }
-  return 'corner';
-}
-
-/**
- * 편지가 생성되면(firestore.rules가 이미 "보낸 사람의 idle 펫으로만"
- * 만들어졌음을 검증함) 그 펫의 실제 문서(species/personality — 클라이언트가
- * 편지에 같이 써넣은 값이 아니라 펫 문서 원본을 다시 읽어서 조작 여지를
- * 없앤다)로 손상 확률을 굴려 outboundDamage를 채우고, replyDeadline을
- * 계산한다. 받는 사람에게는 기존 알림 인프라(users/{uid}/notifications ->
- * sendPushOnNotification)를 그대로 재사용해 도착 알림을 보낸다.
- */
+/** 편지가 생기면 도착 손상·복귀 시각·성격 예외 행동을 정하고 받는 사람에게
+ * 알린다(letters-core.js의 handleLetterCreated). */
 exports.onLetterCreated = onDocumentCreated(
   { document: 'letters/{letterId}', region: 'asia-northeast3' },
   async (event) => {
-    const letter = event.data?.data();
-    if (!letter) return;
-    const letterId = event.params.letterId;
-
-    const petSnap = await db.doc(`users/${letter.fromUid}/pets/${letter.fromPetId}`).get();
-    const species = petSnap.exists ? petSnap.data().species : letter.fromPetSpecies;
-    const personality = petSnap.exists ? petSnap.data().personality : 'easygoing';
-    const outboundDamage = rollDamageLevel(species, personality);
-
-    const createdAtMs = letter.createdAt ? letter.createdAt.toMillis() : Date.now();
-    const replyDeadline = admin.firestore.Timestamp.fromMillis(createdAtMs + letter.waitHours * 60 * 60 * 1000);
-
-    await db.doc(`letters/${letterId}`).update({ outboundDamage, replyDeadline });
-
-    await db
-      .collection(`users/${letter.toUid}/notifications`)
-      .add({
-        type: 'letter_received',
-        fromUid: letter.fromUid,
-        fromNickname: letter.fromNickname,
-        letterId,
-        read: false,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      })
-      .catch((err) => console.error('onLetterCreated: notify failed', err));
+    await lettersCore.handleLetterCreated(event.params.letterId);
   }
 );
 
-/**
- * 답장이 도착하면(letters/{letterId}/reply/main) 왕복 구간의 손상을 다시
- * 굴리고(갈 때/올 때 각각 독립적으로 손상될 수 있다는 컨셉), 부모 편지를
- * 'replied'로, 발신 펫을 idle로 되돌린다. away -> idle 전환은 이 트리거와
- * expireOverdueLetters 딱 두 곳에서만 일어난다(firestore.rules의 pets
- * 규칙 참고 — 클라이언트는 이 방향으로 못 바꾼다).
- */
+/** 답장이 도착하면 돌아오는 길의 손상을 굴리고, 펫을 집으로 돌려보낸다. */
 exports.onLetterReplyCreated = onDocumentCreated(
   { document: 'letters/{letterId}/reply/{replyId}', region: 'asia-northeast3' },
   async (event) => {
-    const reply = event.data?.data();
-    if (!reply) return;
-    const { letterId } = event.params;
-
-    const letterRef = db.doc(`letters/${letterId}`);
-    const letterSnap = await letterRef.get();
-    if (!letterSnap.exists) return;
-    const letter = letterSnap.data();
-    if (letter.status !== 'awaiting_reply') return;
-
-    const petRef = db.doc(`users/${letter.fromUid}/pets/${letter.fromPetId}`);
-    const petSnap = await petRef.get();
-    const species = petSnap.exists ? petSnap.data().species : letter.fromPetSpecies;
-    const personality = petSnap.exists ? petSnap.data().personality : 'easygoing';
-    const damage = rollDamageLevel(species, personality);
-
-    const batch = db.batch();
-    batch.update(event.data.ref, { damage });
-    batch.update(letterRef, { status: 'replied', repliedAt: admin.firestore.FieldValue.serverTimestamp() });
-    if (petSnap.exists) {
-      batch.update(petRef, { status: 'idle', currentLetterId: null });
-    }
-    await batch.commit();
-
-    await db
-      .collection(`users/${letter.fromUid}/notifications`)
-      .add({
-        type: 'letter_replied',
-        fromUid: letter.toUid,
-        fromNickname: letter.toNickname,
-        letterId,
-        read: false,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      })
-      .catch((err) => console.error('onLetterReplyCreated: notify failed', err));
+    await lettersCore.handleReplyCreated(event.params.letterId, event.params.replyId);
   }
 );
 
 /**
- * 15분마다 답장 대기시간이 지난 편지를 정리한다 — 회고 알림(하루 한 번)과
- * 달리 편지는 "몇 시간 대기" 단위의 상대적으로 촘촘한 타이머라 더 자주
- * 돌아야 체감 지연이 작다(임의 기본값, 나중에 조정 가능). 정리 대상 편지의
- * 발신 펫도 이 함수에서 idle로 되돌린다 — 답장을 못 받은 채 시간이
- * 끝나도 펫은 돌아와야 다음 편지를 보낼 수 있다.
+ * 1분마다 복귀 시각이 지난 펫을 돌려보내고, 계속 머무는 펫을 주인에게 알린다.
+ * 대기시간이 5분짜리도 있어서(예전 최소 1시간) 예전처럼 15분마다 돌면 체감
+ * 지연이 너무 컸다. 정확한 남은 시간은 화면이 시각으로 직접 계산해 보여주고,
+ * 이 함수는 상태 정리만 한다(최대 1분 늦을 수 있음).
  */
 exports.expireOverdueLetters = onSchedule(
-  { schedule: '*/15 * * * *', timeZone: 'Asia/Seoul', region: 'asia-northeast3' },
+  { schedule: 'every 1 minutes', timeZone: 'Asia/Seoul', region: 'asia-northeast3' },
   async () => {
-    const now = admin.firestore.Timestamp.now();
-    const snap = await db
-      .collection('letters')
-      .where('status', '==', 'awaiting_reply')
-      .where('replyDeadline', '<=', now)
-      .get();
-    if (snap.empty) return;
+    await lettersCore.sweepLetters();
+  }
+);
 
-    for (const docSnap of snap.docs) {
-      const letter = docSnap.data();
-      try {
-        // onLetterReplyCreated와 같은 이유로 펫 문서 존재를 먼저 확인한다
-        // — 없는 문서를 update()하면 그 배치 전체가 실패해서, 이 편지가
-        // 영영 'expired'로 못 바뀌고 15분마다 계속 같은 자리에서 재시도만
-        // 반복하게 된다(지금은 펫을 지우는 기능 자체가 없어 실제로 벌어질
-        // 상황은 아니지만, 나중에 생기더라도 이 정리 작업만은 항상
-        // 끝나야 한다).
-        const petRef = db.doc(`users/${letter.fromUid}/pets/${letter.fromPetId}`);
-        const petSnap = await petRef.get();
+const SAFE_ID = /^[A-Za-z0-9_:-]{1,128}$/;
 
-        const batch = db.batch();
-        batch.update(docSnap.ref, { status: 'expired', expiredAt: now });
-        if (petSnap.exists) {
-          batch.update(petRef, { status: 'idle', currentLetterId: null });
-        }
-        await batch.commit();
+function requireId(value) {
+  const id = typeof value === 'string' ? value : '';
+  if (!SAFE_ID.test(id)) throw new ActionError(400, 'bad-id');
+  return id;
+}
 
-        await db.collection(`users/${letter.fromUid}/notifications`).add({
-          type: 'letter_expired',
-          fromUid: letter.toUid,
-          fromNickname: letter.toNickname,
-          letterId: docSnap.id,
-          read: false,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-      } catch (err) {
-        console.error('expireOverdueLetters: failed for', docSnap.id, err);
+/**
+ * 펫에게 하는 행동들(회수, 쓰다듬기/간식, "뭐라고 했어?"). 친밀도·배달
+ * 기록·펫 상태처럼 클라이언트가 직접 바꾸면 안 되는 값을 건드려서 서버에서
+ * 검증하고 처리한다.
+ *   POST { action: 'recall', petId }
+ *   POST { action: 'interact', ownerUid, petId, kind: 'pet' | 'snack' }
+ *   POST { action: 'reask', letterId, part: 'outbound' | 'reply' }
+ * id는 문서 경로에 그대로 들어가서, '/'가 섞인 값으로 다른 문서를 가리키지
+ * 못하게 형식을 먼저 검사한다.
+ */
+exports.petAction = onRequest({ region: 'asia-northeast3', cors: true }, async (req, res) => {
+  try {
+    if (req.method !== 'POST') {
+      res.status(405).json({ error: 'method-not-allowed' });
+      return;
+    }
+    const uid = await verifyBearer(req);
+    if (!uid) {
+      res.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    if (!petActionRateLimit(uid)) {
+      res.status(429).json({ error: 'too-many-requests' });
+      return;
+    }
+
+    const body = req.body || {};
+    let result;
+    switch (body.action) {
+      case 'recall':
+        result = await lettersCore.recallPet(uid, requireId(body.petId));
+        break;
+      case 'interact':
+        result = await lettersCore.interactWithPet(uid, requireId(body.ownerUid), requireId(body.petId), body.kind);
+        break;
+      case 'reask':
+        result = await lettersCore.reaskLetter(uid, requireId(body.letterId), body.part);
+        break;
+      default:
+        res.status(400).json({ error: 'bad-action' });
+        return;
+    }
+    res.status(200).json(result);
+  } catch (err) {
+    if (err instanceof ActionError) {
+      res.status(err.status).json({ error: err.code });
+      return;
+    }
+    console.error('petAction error', err);
+    res.status(500).json({ error: 'internal' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 집계 값(좋아요 수, 댓글 수, 작성한 DAY 수)은 서버만 센다.
+//
+// 예전엔 클라이언트가 직접 ±1 했고 보안 규칙은 "한 번에 ±1인지"만 봤다 —
+// 그래서 실제 좋아요/댓글 문서 없이 +1 요청만 반복해서 숫자를 마음대로
+// 부풀릴 수 있었다(dayCount도 같아서 "DAY 7개 쓰면 두 번째 펫" 미션을 글
+// 없이 채울 수 있었다). 지금은 클라이언트가 이 필드를 아예 못 바꾸고, 문서가
+// 생기거나 지워질 때마다 서버가 실제 개수를 다시 세어 덮어쓴다. "다시 세기"라
+// 트리거가 두 번 와도 숫자가 틀어지지 않는다.
+// ---------------------------------------------------------------------------
+
+async function recountInto(targetRef, field, query) {
+  const snap = await query.count().get();
+  await targetRef.update({ [field]: snap.data().count }).catch((err) => {
+    // 대상 문서가 이미 없으면(예: 탈퇴 정리 중) 조용히 넘어간다.
+    if (err.code !== 5) console.error(`${field} 재집계 실패`, targetRef.path, err);
+  });
+}
+
+exports.onLikeWritten = onDocumentWritten(
+  { document: 'days/{dayId}/likes/{likeUid}', region: 'asia-northeast3' },
+  async (event) => {
+    const dayRef = db.doc(`days/${event.params.dayId}`);
+    await recountInto(dayRef, 'likeCount', dayRef.collection('likes'));
+  }
+);
+
+exports.onCommentWritten = onDocumentWritten(
+  { document: 'days/{dayId}/comments/{commentId}', region: 'asia-northeast3' },
+  async (event) => {
+    const dayRef = db.doc(`days/${event.params.dayId}`);
+    await recountInto(dayRef, 'commentCount', dayRef.collection('comments'));
+
+    // 댓글이 지워지면(본인 삭제든, DAY 작성자가 정리했든) 그 사람의 "내가 쓴
+    // 댓글" 사본도 같이 지운다. DAY 작성자는 남의 users/{uid}/myComments를
+    // 직접 못 지우니(본인 것만 쓰기 가능) 서버가 대신 정리한다.
+    const before = event.data?.before;
+    const after = event.data?.after;
+    if (before && before.exists && !(after && after.exists)) {
+      const authorId = before.data().authorId;
+      if (authorId) {
+        await db
+          .doc(`users/${authorId}/myComments/${event.params.commentId}`)
+          .delete()
+          .catch((err) => console.error('myComments 정리 실패', err));
       }
     }
+  }
+);
+
+function countsAsDay(snap) {
+  if (!snap || !snap.exists) return false;
+  const day = snap.data();
+  return day.status === 'confirmed' && day.deleted === false;
+}
+
+/** 확정됐고 삭제 안 된 DAY 수(dayCount). 좋아요 수 갱신처럼 집계와 상관없는
+ * 수정에도 이 트리거가 깨어나서, "집계 대상 여부"가 바뀐 경우에만 다시 센다. */
+exports.onDayWritten = onDocumentWritten(
+  { document: 'days/{dayId}', region: 'asia-northeast3' },
+  async (event) => {
+    const before = event.data?.before;
+    const after = event.data?.after;
+    if (countsAsDay(before) === countsAsDay(after)) return;
+    const authorId = (after && after.exists ? after.data() : before.data()).authorId;
+    if (!authorId) return;
+    await recountInto(
+      db.doc(`users/${authorId}`),
+      'dayCount',
+      db.collection('days').where('authorId', '==', authorId).where('status', '==', 'confirmed').where('deleted', '==', false)
+    );
   }
 );
 

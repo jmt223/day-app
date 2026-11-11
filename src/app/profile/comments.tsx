@@ -77,7 +77,7 @@ export default function MyCommentsScreen() {
     if (!ok) return;
     setDeletingId(entry.commentId);
     try {
-      await deleteComment(entry.dayId, entry.commentId, user.uid);
+      await deleteComment(entry.dayId, entry.commentId);
       setComments((prev) => prev.filter((c) => c.commentId !== entry.commentId));
     } catch {
       notify(t('common.error'), t('myComments.deleteFailed'));

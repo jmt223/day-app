@@ -4,7 +4,6 @@ import {
   doc,
   getDoc,
   getDocs,
-  increment,
   limit,
   orderBy,
   query,
@@ -22,7 +21,7 @@ import { ref, uploadBytes } from '@firebase/storage';
 import { db, storage } from '@/lib/firebase';
 import { t } from '@/i18n/store';
 import { sendNotification } from '@/data/notifications';
-import { bumpDayCount, getUserProfilesByUids } from '@/data/users';
+import { getUserProfilesByUids } from '@/data/users';
 import type { DayDoc, NewDayInput } from '@/types/day';
 import { isFutureLabel, isWritableNow, kstLabelToTimestamp, monthRangeLabels, todayKstLabel } from '@/utils/date';
 
@@ -113,8 +112,8 @@ export async function createDay(input: NewDayInput, author: Author): Promise<str
     deleted: false,
   });
 
+  // 작성한 DAY 수(dayCount)는 서버(functions/index.js의 onDayWritten)가 센다.
   if (status === 'confirmed') {
-    await bumpDayCount(author.uid, 1).catch(() => undefined);
     await Promise.all(
       input.taggedFriends.map((friend) =>
         sendNotification(friend.uid, {
@@ -400,23 +399,6 @@ export async function listMyDaysInMonth(uid: string, year: number, month1to12: n
   return merged;
 }
 
-export async function listMyDaysTimeline(uid: string, limitCount = 50): Promise<DayDoc[]> {
-  const database = requireDb();
-  const q = query(
-    collection(database, 'days'),
-    where('authorId', '==', uid),
-    where('inHistory', '==', true),
-    where('status', '==', 'confirmed'),
-    where('deleted', '==', false),
-    orderBy('date', 'desc'),
-    limit(limitCount)
-  );
-  const [ownDays, linkedDays] = await Promise.all([mapDocs(await getDocs(q)), resolveHistoryLinks(uid)]);
-  const merged = [...ownDays, ...linkedDays];
-  merged.sort((a, b) => (b.date?.toMillis() ?? 0) - (a.date?.toMillis() ?? 0));
-  return merged.slice(0, limitCount);
-}
-
 /**
  * "내 연혁"의 타임라인 뷰는 예전엔 limitCount(기본 50)까지만 가져오고
  * 그 이상을 볼 방법이 아예 없었다 — DAY를 50개 넘게 쓴 사람은 오래된
@@ -597,7 +579,6 @@ export async function confirmDay(
   const database = requireDb();
   await updateDoc(doc(database, 'days', day.id), { status: 'confirmed', updatedAt: serverTimestamp() });
 
-  await bumpDayCount(day.authorId, 1).catch(() => undefined);
   await Promise.all(
     day.taggedFriendUids.map((uid) =>
       sendNotification(uid, {
@@ -671,22 +652,21 @@ export async function toggleLike(
   dayTitle: string
 ): Promise<boolean> {
   const database = requireDb();
-  const dayRef = doc(database, 'days', dayId);
   const likeRef = doc(database, 'days', dayId, 'likes', liker.uid);
   // "내가 좋아요한 DAY 모아보기"용 사본 — listLikedDays 주석 참고.
   const myLikeRef = doc(database, 'users', liker.uid, 'myLikes', dayId);
 
+  // 좋아요 수(likeCount)는 서버(functions/index.js의 onLikeWritten)가 실제
+  // 좋아요 문서 개수를 다시 세서 쓴다 — 여기서는 문서만 만들고 지운다.
   const nowLiked = await runTransaction(database, async (tx) => {
     const likeSnap = await tx.get(likeRef);
     if (likeSnap.exists()) {
       tx.delete(likeRef);
       tx.delete(myLikeRef);
-      tx.update(dayRef, { likeCount: increment(-1) });
       return false;
     }
     tx.set(likeRef, { uid: liker.uid, createdAt: serverTimestamp() });
     tx.set(myLikeRef, { dayId, createdAt: serverTimestamp() });
-    tx.update(dayRef, { likeCount: increment(1) });
     return true;
   });
 
@@ -721,4 +701,66 @@ export async function listLikedDays(uid: string, limitCount = 50): Promise<DayDo
     .map((d) => normalizeDay(d.id, d.data()))
     .filter((d) => !d.deleted);
   return withFreshProfiles(days);
+}
+
+/** 내가 특정 날짜(KST 'YYYY-MM-DD')로 확정해서 쓴 DAY들 — 홈 상단에 "오늘의
+ * DAY" 이름을 보여줄 때 쓴다. 등호 조건만 있어서 복합 색인 없이 동작한다. */
+export async function listMyDaysOn(uid: string, dateLabel: string): Promise<DayDoc[]> {
+  const database = requireDb();
+  const snap = await getDocs(
+    query(
+      collection(database, 'days'),
+      where('authorId', '==', uid),
+      where('dateLabel', '==', dateLabel),
+      where('status', '==', 'confirmed'),
+      where('deleted', '==', false)
+    )
+  );
+  const days = snap.docs.map((d) => normalizeDay(d.id, d.data()));
+  return days.sort((a, b) => (b.createdAt?.toMillis() ?? 0) - (a.createdAt?.toMillis() ?? 0));
+}
+
+export type FriendUpdate = { uid: string; latestMs: number };
+
+/**
+ * "업데이트한 친구" — 최근 며칠 안에 연혁에 새 DAY를 올린 친구들(최신순).
+ * 친구 DAY 피드(listFriendsFeed)와 같은 쿼리를 쓴다: 전체공개/친구공개만 보고,
+ * 그룹공개는 친구마다 추가 조회가 필요해서 이 목록에선 뺀다(그 친구 연혁
+ * 화면에선 정상적으로 보인다). 연혁에서 뺀 DAY(inHistory false)는 업데이트로
+ * 치지 않는다.
+ */
+export async function listFriendUpdates(friendUids: string[], withinDays = 14): Promise<FriendUpdate[]> {
+  if (friendUids.length === 0) return [];
+  const database = requireDb();
+  const uids = friendUids.slice(0, 30);
+  const since = Timestamp.fromMillis(Date.now() - withinDays * 24 * 60 * 60 * 1000);
+  const base = [
+    where('authorId', 'in', uids),
+    where('status', '==', 'confirmed'),
+    where('deleted', '==', false),
+  ];
+  const snaps = await Promise.all(
+    (['public', 'friends'] as const).map((visibility) =>
+      getDocs(
+        query(
+          collection(database, 'days'),
+          ...base,
+          where('visibility', '==', visibility),
+          where('createdAt', '>=', since),
+          orderBy('createdAt', 'desc'),
+          limit(60)
+        )
+      )
+    )
+  );
+  const latest = new Map<string, number>();
+  for (const snap of snaps) {
+    for (const d of snap.docs) {
+      const data = d.data();
+      if (data.inHistory === false) continue;
+      const ms = (data.createdAt as Timestamp | undefined)?.toMillis() ?? 0;
+      if (ms > (latest.get(data.authorId) ?? 0)) latest.set(data.authorId, ms);
+    }
+  }
+  return Array.from(latest, ([uid, latestMs]) => ({ uid, latestMs })).sort((a, b) => b.latestMs - a.latestMs);
 }

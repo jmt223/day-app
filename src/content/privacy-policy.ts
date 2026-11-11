@@ -4,8 +4,8 @@
  * translations.ts에 넣으면 그 파일의 "짧은 UI 문구" 성격과 안 맞고,
  * 나중에 조항만 따로 검토·수정하기도 이 편이 훨씬 쉽다.
  *
- * 내용을 바꿀 땐 반드시 PRIVACY_POLICY_EFFECTIVE_DATE도 오늘 날짜로 같이
- * 갱신할 것 — "변경 이력"의 근거가 되는 값이다.
+ * 내용을 바꿀 땐 반드시 ko/en의 effectiveDateLabel(시행일)도 실제 반영일로
+ * 같이 갱신할 것 — "변경 이력"의 근거가 되는 값이다.
  */
 
 export type PrivacyPolicySection = {
@@ -22,18 +22,17 @@ export type PrivacyPolicyContent = {
 };
 
 export const PRIVACY_POLICY_CONTACT_EMAIL = 'whsaktxod223@gmail.com';
-export const PRIVACY_POLICY_EFFECTIVE_DATE = '2026-09-03';
 
 const ko: PrivacyPolicyContent = {
   title: 'DAY 개인정보처리방침',
-  effectiveDateLabel: '시행일: 2026년 9월 3일',
+  effectiveDateLabel: '시행일: 2026년 11월 11일',
   intro:
     'DAY(이하 "서비스")를 만든 개발자(이하 "개발자")는 이용자의 개인정보를 소중히 여기며, 「개인정보 보호법」 등 관련 법령을 준수합니다. 이 개인정보처리방침은 서비스가 어떤 개인정보를 수집하고, 어떻게 이용·보관하며, 이용자가 어떤 권리를 행사할 수 있는지 안내합니다.',
   sections: [
     {
       heading: '1. 수집하는 개인정보 항목',
       body:
-        '필수: 이메일 주소, 비밀번호(암호화되어 저장되며 개발자를 포함해 누구도 열람할 수 없습니다), 닉네임\n선택: 프로필 사진\n\n소셜 로그인(Google, Kakao) 이용 시: 해당 계정의 이메일, 이름(닉네임), 프로필 사진 — 이용자가 로그인 과정에서 동의한 정보만 전달받습니다.\n\n서비스 이용 중 만들어지는 정보: 작성한 게시물(제목, 본문, 사진, 기분 태그, 공개범위, 태그한 친구), 선택적으로 첨부하는 위치 정보(게시물 작성 화면에서 직접 켰을 때만 수집되는 GPS 좌표 및 장소명), 댓글, 좋아요, 친구·친구그룹·차단 목록, 신고 내용\n\n자동으로 수집되는 정보: 푸시 알림 발송을 위한 기기 푸시 토큰, 알림·언어·화면테마 설정, 서비스 접속 기록 및 IP 주소(오류 대응, 부정 이용 방지 목적)',
+        '필수: 이메일 주소, 비밀번호(암호화되어 저장되며 개발자를 포함해 누구도 열람할 수 없습니다), 닉네임\n선택: 프로필 사진\n\n소셜 로그인(Google, Kakao) 이용 시: 해당 계정의 이메일, 이름(닉네임), 프로필 사진 — 이용자가 로그인 과정에서 동의한 정보만 전달받습니다.\n\n서비스 이용 중 만들어지는 정보: 작성한 게시물(제목, 본문, 사진, 기분 태그, 공개범위, 태그한 친구), 선택적으로 첨부하는 위치 정보(게시물 작성 화면에서 직접 켰을 때만 수집되는 GPS 좌표 및 장소명), 댓글, 좋아요, 친구·친구그룹·차단 목록, 신고 내용, 펫 편지(친구와 주고받은 메시지·답장 내용과 보낸 시각, 손상 여부), 펫 정보(이름, 종, 성격, 친밀도, 배달 기록)\n\n자동으로 수집되는 정보: 푸시 알림 발송을 위한 기기 푸시 토큰, 알림·언어·화면테마 설정, 서비스 접속 기록 및 IP 주소(오류 대응, 부정 이용 방지 목적)',
     },
     {
       heading: '2. 개인정보의 수집 및 이용 목적',
@@ -91,14 +90,14 @@ const ko: PrivacyPolicyContent = {
 
 const en: PrivacyPolicyContent = {
   title: 'DAY Privacy Policy',
-  effectiveDateLabel: 'Effective date: September 3, 2026',
+  effectiveDateLabel: 'Effective date: November 11, 2026',
   intro:
     'The developer of DAY (the "Service") values your privacy and complies with applicable data protection laws, including South Korea\'s Personal Information Protection Act (PIPA). This Privacy Policy explains what personal information the Service collects, how it is used and stored, and what rights you have over it.',
   sections: [
     {
       heading: '1. Information We Collect',
       body:
-        'Required: email address, password (stored encrypted; not readable by anyone, including the developer), nickname\nOptional: profile photo\n\nIf you sign in with Google or Kakao: the email, name (nickname), and profile photo from that account — only the information you consent to share during sign-in.\n\nInformation created as you use the Service: posts you write (title, body text, photos, mood tag, visibility setting, tagged friends), optional location data (GPS coordinates and place name, collected only if you turn this on while writing a post), comments, likes, your friends/friend groups/blocked users list, and report content you submit.\n\nAutomatically collected information: a device push token for notifications, your notification/language/theme settings, and access logs/IP address (for troubleshooting and abuse prevention).',
+        'Required: email address, password (stored encrypted; not readable by anyone, including the developer), nickname\nOptional: profile photo\n\nIf you sign in with Google or Kakao: the email, name (nickname), and profile photo from that account — only the information you consent to share during sign-in.\n\nInformation created as you use the Service: posts you write (title, body text, photos, mood tag, visibility setting, tagged friends), optional location data (GPS coordinates and place name, collected only if you turn this on while writing a post), comments, likes, your friends/friend groups/blocked users list, report content you submit, pet letters (messages and replies you exchange with friends, when they were sent, and whether they were damaged), and pet information (name, kind, personality, bond level, delivery history).\n\nAutomatically collected information: a device push token for notifications, your notification/language/theme settings, and access logs/IP address (for troubleshooting and abuse prevention).',
     },
     {
       heading: '2. Purpose of Collection and Use',

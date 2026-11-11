@@ -1,5 +1,3 @@
-import { Platform } from 'react-native';
-
 /**
  * DAY 앱의 색상 토큰. 따뜻한 크림톤 배경 + 테라코타 포인트 컬러로
  * 흔한 피드형 SNS와 구분되는, 편안하고 사적인 다이어리 톤을 만든다.
@@ -18,6 +16,13 @@ export const Colors = {
     accentSoft: '#F3E1D1',
     onAccent: '#FFFFFF',
     danger: '#B3452F',
+    // 펫 편지 화면 전용 포인트(목업의 초록) — 펫을 보내고 부르는 행동에만 쓴다.
+    leaf: '#5B7F52',
+    leafSoft: '#E3EDDA',
+    onLeaf: '#FFFFFF',
+    // 받은 편지 말풍선의 종이색
+    paper: '#F5E9CF',
+    paperInk: '#4A3826',
   },
   dark: {
     background: '#1C1814',
@@ -32,6 +37,12 @@ export const Colors = {
     accentSoft: '#40301F',
     onAccent: '#241708',
     danger: '#E08170',
+    leaf: '#93B886',
+    leafSoft: '#2B3826',
+    onLeaf: '#14200F',
+    // 다크 모드의 내 말풍선(accentSoft)과 확실히 구분되게 조금 더 밝고 노란 종이색.
+    paper: '#4D402C',
+    paperInk: '#F3E8CF',
   },
 } as const;
 
@@ -127,7 +138,6 @@ export const FONT_PRESETS = {
 } as const;
 
 export type FontPresetKey = keyof typeof FONT_PRESETS;
-export type FontFamilySet = (typeof FONT_PRESETS)[FontPresetKey];
 export const DEFAULT_FONT_PRESET: FontPresetKey = 'gowun';
 
 export const Spacing = {
@@ -146,6 +156,3 @@ export const Radius = {
   large: 18,
   pill: 999,
 } as const;
-
-export const BottomTabInset = Platform.select({ ios: 20, android: 12, default: 0 });
-export const MaxContentWidth = 480;

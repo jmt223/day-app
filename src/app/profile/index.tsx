@@ -144,8 +144,10 @@ export default function ProfileScreen() {
     try {
       await sendSummon({ uid: user.uid, nickname: myProfile?.nickname ?? '', photoURL: myProfile?.photoURL ?? null }, paramUid);
       notify(t('profile.summonSentTitle'), t('profile.summonSentMessage', { nickname: profile.nickname }));
-    } catch {
-      notify(t('common.error'), t('profile.summonFailed'));
+    } catch (error) {
+      // 24시간 안에 이미 호출했으면 보안 규칙이 거부한다(permission-denied).
+      const denied = (error as { code?: string })?.code === 'permission-denied';
+      notify(t('common.error'), denied ? t('profile.summonCooldown') : t('profile.summonFailed'));
     } finally {
       setSummoning(false);
     }

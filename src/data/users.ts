@@ -4,10 +4,10 @@ import {
   arrayUnion,
   collection,
   deleteDoc,
+  deleteField,
   doc,
   getDoc,
   getDocs,
-  increment,
   query,
   runTransaction,
   serverTimestamp,
@@ -20,7 +20,7 @@ import {
 import { deleteObject, getDownloadURL, ref, uploadBytes } from '@firebase/storage';
 
 import { auth, db, storage } from '@/lib/firebase';
-import { grantStarterPet } from '@/data/pets';
+import { functionUrl } from '@/lib/functions-url';
 import { t } from '@/i18n/store';
 import type { FriendGroup, NotificationSettings, UserProfile } from '@/types/user';
 
@@ -78,10 +78,8 @@ export async function ensureUserProfile(user: FirebaseUser, nickname?: string): 
     )
   );
 
-  // 가입 시 기본 펫(참새) 지급. petCount는 users/{uid} 문서의 create
-  // 규칙이 필드를 엄격히 제한해서(hasOnly) 저 위 tx.set엔 못 넣고, 여기서
-  // 별도 업데이트로 채운다(grantStarterPet 참고).
-  await grantStarterPet(user.uid).catch((err) => console.error('grantStarterPet failed', err));
+  // 첫 펫은 여기서 자동으로 주지 않는다 — 기획상 종을 사용자가 직접 고른다
+  // (편지함/내 펫 화면에서 펫이 없으면 종 고르기 화면이 뜬다).
 
   const created = await getDoc(ref);
   return created.data() as UserProfile;
@@ -127,16 +125,19 @@ export async function recordConsent(uid: string): Promise<void> {
   await updateDoc(doc(database, 'users', uid), { consentedAt: serverTimestamp() });
 }
 
-export async function bumpDayCount(uid: string, delta: number): Promise<void> {
-  const database = requireDb();
-  await updateDoc(doc(database, 'users', uid), { dayCount: increment(delta) });
-}
+// dayCount(작성한 DAY 수)는 클라이언트가 더 이상 직접 바꾸지 않는다 —
+// 서버(functions/index.js의 onDayWritten)가 실제 개수를 다시 세서 쓴다.
 
 /** 이 기기의 Expo 푸시 토큰을 내 계정에 등록한다(여러 기기를 쓰면 배열에
- * 여러 개가 쌓인다). 이미 등록된 토큰이면 중복 없이 그대로 둔다. */
-export async function addPushToken(uid: string, token: string): Promise<void> {
+ * 여러 개가 쌓인다). 토큰은 본인만 읽을 수 있는 users/{uid}/private/push에
+ * 둔다 — 예전엔 누구나 읽는 프로필 문서(pushTokens)에 있어서 남이 토큰을
+ * 가져가 가짜 푸시를 보낼 수 있었다. 예전 필드가 남아 있으면 이때 지운다. */
+export async function addPushToken(uid: string, token: string, legacyTokensPresent: boolean): Promise<void> {
   const database = requireDb();
-  await updateDoc(doc(database, 'users', uid), { pushTokens: arrayUnion(token) });
+  await setDoc(doc(database, 'users', uid, 'private', 'push'), { tokens: arrayUnion(token) }, { merge: true });
+  if (legacyTokensPresent) {
+    await updateDoc(doc(database, 'users', uid), { pushTokens: deleteField() }).catch(() => undefined);
+  }
 }
 
 /** 로그아웃할 때 이 기기의 푸시 토큰을 계정에서 뗀다. 안 떼면, 같은 기기를
@@ -146,7 +147,7 @@ export async function addPushToken(uid: string, token: string): Promise<void> {
  * 묶이는 값이라, 계정을 바꿔도 토큰 자체는 그대로 남기 때문이다. */
 export async function removePushToken(uid: string, token: string): Promise<void> {
   const database = requireDb();
-  await updateDoc(doc(database, 'users', uid), { pushTokens: arrayRemove(token) });
+  await updateDoc(doc(database, 'users', uid, 'private', 'push'), { tokens: arrayRemove(token) }).catch(() => undefined);
 }
 
 export async function updateNotificationSettings(uid: string, settings: NotificationSettings): Promise<void> {
@@ -163,8 +164,8 @@ export async function updateUserLocale(uid: string, locale: 'ko' | 'en'): Promis
   await updateDoc(doc(database, 'users', uid), { locale });
 }
 
-const FIND_UID_BY_EMAIL_URL = 'https://asia-northeast3-day-app-6e618.cloudfunctions.net/findUidByEmail';
-const EXCHANGE_KAKAO_CODE_URL = 'https://asia-northeast3-day-app-6e618.cloudfunctions.net/exchangeKakaoCode';
+const FIND_UID_BY_EMAIL_URL = functionUrl('findUidByEmail');
+const EXCHANGE_KAKAO_CODE_URL = functionUrl('exchangeKakaoCode');
 
 /**
  * 카카오 로그인의 인가 코드를 Firebase 커스텀 토큰으로 바꾼다. 로그인하기
@@ -283,6 +284,9 @@ export async function prepareAccountDeletion(uid: string, email: string | null):
     bio: '',
     photoURL: null,
   });
+
+  // 이 계정 앞으로 푸시가 더 가지 않게 토큰도 지운다.
+  await deleteDoc(doc(database, 'users', uid, 'private', 'push')).catch(() => undefined);
 
   if (email) {
     await deleteDoc(doc(database, 'usersByEmail', emailKey(email))).catch(() => undefined);

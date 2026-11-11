@@ -9,9 +9,11 @@ import {
   orderBy,
   query,
   serverTimestamp,
+  setDoc,
   updateDoc,
   where,
   writeBatch,
+  type Query,
 } from '@firebase/firestore';
 
 import { db } from '@/lib/firebase';
@@ -26,18 +28,28 @@ function requireDb() {
 type NewNotification =
   | { type: 'tag' | 'comment' | 'like'; fromUid: string; fromNickname: string; dayId: string; dayTitle: string }
   | { type: 'friend_request' | 'friend_accept'; fromUid: string; fromNickname: string }
-  // letter_received/letter_replied/letter_expired는 functions/index.js가
-  // Admin SDK로 직접 쓴다(편지 손상 롤 등 서버만 아는 계산이 끼어있어서) —
-  // pet_summon만 클라이언트가 직접 만든다(호출 자체가 클라이언트 액션).
+  // 편지 도착/답장/복귀/재문의 알림은 서버(functions/letters-core.js)가 Admin
+  // SDK로 직접 쓴다 — pet_summon만 클라이언트가 직접 만든다(호출 자체가
+  // 클라이언트 액션).
   | { type: 'pet_summon'; fromUid: string; fromNickname: string };
+
+/** 좋아요/태그 알림은 (종류, DAY, 보낸 사람)마다 문서 ID를 하나로 고정한다 —
+ * 보안 규칙이 이 ID 형식을 강제해서, 좋아요를 눌렀다 취소했다 반복해도 알림과
+ * 푸시는 한 번만 간다(두 번째부터는 이미 있는 문서라 규칙이 거부한다). */
+function fixedNotificationId(data: NewNotification): string | null {
+  if (data.type === 'like' || data.type === 'tag') return `${data.type}_${data.dayId}_${data.fromUid}`;
+  return null;
+}
 
 export async function sendNotification(toUid: string, data: NewNotification): Promise<void> {
   const database = requireDb();
-  await addDoc(collection(database, 'users', toUid, 'notifications'), {
-    ...data,
-    read: false,
-    createdAt: serverTimestamp(),
-  });
+  const payload = { ...data, read: false, createdAt: serverTimestamp() };
+  const fixedId = fixedNotificationId(data);
+  if (fixedId) {
+    await setDoc(doc(database, 'users', toUid, 'notifications', fixedId), payload);
+  } else {
+    await addDoc(collection(database, 'users', toUid, 'notifications'), payload);
+  }
 }
 
 export async function listNotifications(uid: string, limitCount = 50): Promise<AppNotification[]> {
@@ -95,36 +107,44 @@ export async function countUnreadNotifications(uid: string): Promise<number> {
   return snap.data().count;
 }
 
-const LETTER_NOTIFICATION_TYPES = ['letter_received', 'letter_replied', 'letter_expired', 'pet_summon'] as const;
+const LETTER_NOTIFICATION_TYPES = [
+  'letter_received',
+  'letter_replied',
+  'letter_expired',
+  'pet_summon',
+  'summon_accepted',
+  'pet_early_return',
+  'pet_overstay',
+  'letter_reask',
+] as const;
+
+function unreadLetterQuery(uid: string): Query {
+  return query(
+    collection(requireDb(), 'users', uid, 'notifications'),
+    where('read', '==', false),
+    where('type', 'in', LETTER_NOTIFICATION_TYPES)
+  );
+}
 
 /** 편지함 탭 배지용 — 별도 "안읽은 편지" 필드를 새로 만들지 않고, 이미
  * 있는 알림함의 read 플래그를 편지 관련 타입만 걸러서 센다. 이 종류들만
  * 걸러도 where가 전부 등호(read==false, type in [...])라 복합 색인 없이
  * 자동 색인만으로 동작한다. */
 export async function countUnreadLetterNotifications(uid: string): Promise<number> {
-  const database = requireDb();
-  const q = query(
-    collection(database, 'users', uid, 'notifications'),
-    where('read', '==', false),
-    where('type', 'in', LETTER_NOTIFICATION_TYPES)
-  );
-  const snap = await getCountFromServer(q);
+  const snap = await getCountFromServer(unreadLetterQuery(uid));
   return snap.data().count;
 }
 
-/** 편지함 탭을 열어본 것 자체를 "확인했다"는 신호로 보고, 편지 관련
- * 안읽은 알림을 한 번에 읽음 처리한다(markAllNotificationsRead와 같은
- * 배치 청크 패턴). */
-export async function markLetterNotificationsRead(uid: string): Promise<void> {
+/** 편지함 목록에서 "새 소식" 점을 찍을 상대들 — 안 읽은 편지 알림을 보낸 사람. */
+export async function listUnreadLetterSenders(uid: string): Promise<Set<string>> {
+  const snap = await getDocs(query(unreadLetterQuery(uid), limit(100)));
+  return new Set(snap.docs.map((d) => d.data().fromUid as string));
+}
+
+async function markRead(q: Query): Promise<void> {
   const database = requireDb();
-  const q = query(
-    collection(database, 'users', uid, 'notifications'),
-    where('read', '==', false),
-    where('type', 'in', LETTER_NOTIFICATION_TYPES)
-  );
   const snap = await getDocs(q);
   if (snap.empty) return;
-
   const BATCH_LIMIT = 500;
   for (let i = 0; i < snap.docs.length; i += BATCH_LIMIT) {
     const batch = writeBatch(database);
@@ -133,4 +153,11 @@ export async function markLetterNotificationsRead(uid: string): Promise<void> {
     }
     await batch.commit();
   }
+}
+
+/** 그 사람과의 대화창을 열면, 그 사람이 보낸(또는 그 사람과의 편지에 관한)
+ * 안 읽은 편지 알림을 읽음 처리한다 — 예전엔 편지함 탭을 열기만 해도 전부
+ * 지워져서, 누구한테서 새 편지가 왔는지 목록에서 알 수 없었다. */
+export async function markLetterNotificationsReadFrom(uid: string, otherUid: string): Promise<void> {
+  await markRead(query(unreadLetterQuery(uid), where('fromUid', '==', otherUid)));
 }

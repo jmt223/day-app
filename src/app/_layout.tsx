@@ -100,11 +100,14 @@ function RootNavigator() {
     }
   }, [pathname]);
 
+  // 예전 위치(누구나 읽는 프로필 문서)에 푸시 토큰이 남아 있으면 등록하면서
+  // 같이 지운다(utils/push-notifications.ts).
+  const hasLegacyPushTokens = (profile?.pushTokens?.length ?? 0) > 0;
   useEffect(() => {
     if (user && emailVerified) {
-      registerForPushNotifications(user.uid);
+      registerForPushNotifications(user.uid, hasLegacyPushTokens);
     }
-  }, [user, emailVerified]);
+  }, [user, emailVerified, hasLegacyPushTokens]);
 
   // 이 기기에서 실제로 쓰고 있는 언어를 계정에도 기록해둔다 — 서버(푸시
   // 알림)는 기기에 저장된 "언어 설정"을 알 방법이 없어서, 실제 문구를
@@ -125,11 +128,14 @@ function RootNavigator() {
         type?: string;
         dayId?: string | null;
         letterId?: string | null;
+        fromUid?: string | null;
       };
       if (data?.type === 'friend_request') {
         router.push('/(tabs)/friends');
       } else if (data?.type === 'pet_summon') {
-        router.push('/(tabs)/letters');
+        // 호출한 사람과의 대화창에서 바로 "보내기"를 누를 수 있다.
+        if (data.fromUid) router.push({ pathname: '/letters/with/[uid]', params: { uid: data.fromUid } });
+        else router.push({ pathname: '/(tabs)/letters', params: { section: 'mailbox' } });
       } else if (data?.letterId) {
         router.push(`/letters/${data.letterId}`);
       } else if (data?.dayId) {
@@ -236,6 +242,15 @@ function RootNavigator() {
           />
           <Stack.Screen
             name="letters/[id]"
+            options={{
+              headerShown: true,
+              title: t('header.letterDetail'),
+              headerLeft: () => <HeaderBackButton fallbackHref="/(tabs)/letters" />,
+            }}
+          />
+          {/* 친구와의 대화창 — 제목(상대 프로필)은 화면이 직접 채운다. */}
+          <Stack.Screen
+            name="letters/with/[uid]"
             options={{
               headerShown: true,
               title: t('header.letterDetail'),

@@ -15,6 +15,7 @@ import { useTheme } from '@/hooks/use-theme';
 import type { AppNotification, NotificationType } from '@/types/user';
 import { confirmAsync, notify } from '@/utils/confirm';
 import { relativeTimeFromNow } from '@/utils/date';
+import { petName } from '@/utils/josa';
 
 const ICONS: Record<NotificationType, keyof typeof import('@expo/vector-icons/Ionicons').default.glyphMap> = {
   tag: 'person-add-outline',
@@ -27,6 +28,10 @@ const ICONS: Record<NotificationType, keyof typeof import('@expo/vector-icons/Io
   letter_replied: 'mail-open-outline',
   letter_expired: 'time-outline',
   pet_summon: 'paw-outline',
+  summon_accepted: 'paw-outline',
+  pet_early_return: 'flash-outline',
+  pet_overstay: 'hourglass-outline',
+  letter_reask: 'help-circle-outline',
 };
 
 function messageFor(notification: AppNotification, t: ReturnType<typeof useLocale>['t']): string {
@@ -44,13 +49,27 @@ function messageFor(notification: AppNotification, t: ReturnType<typeof useLocal
     case 'memory':
       return t('notifications.memory', { years: notification.yearsAgo ?? 1, dayTitle: notification.dayTitle ?? '' });
     case 'letter_received':
-      return t('notifications.letterReceived', { nickname: notification.fromNickname });
+      return notification.petName
+        ? t('notifications.letterReceivedPet', { nickname: notification.fromNickname, pet: petName(notification.petName) })
+        : t('notifications.letterReceived', { nickname: notification.fromNickname });
     case 'letter_replied':
       return t('notifications.letterReplied', { nickname: notification.fromNickname });
     case 'letter_expired':
-      return t('notifications.letterExpired', { nickname: notification.fromNickname });
+      return notification.petName
+        ? t('notifications.letterExpiredPet', { nickname: notification.fromNickname, pet: petName(notification.petName) })
+        : t('notifications.letterExpired', { nickname: notification.fromNickname });
     case 'pet_summon':
       return t('notifications.petSummon', { nickname: notification.fromNickname });
+    case 'summon_accepted':
+      return t('notifications.summonAccepted', { nickname: notification.fromNickname, pet: petName(notification.petName ?? '', '을/를') });
+    case 'pet_early_return':
+      return t('notifications.petEarlyReturn', { pet: petName(notification.petName ?? '') });
+    case 'pet_overstay':
+      return t('notifications.petOverstay', { nickname: notification.fromNickname, pet: petName(notification.petName ?? '') });
+    case 'letter_reask':
+      return t('notifications.letterReask', { nickname: notification.fromNickname });
+    default:
+      return t('notifications.default');
   }
 }
 
@@ -144,7 +163,7 @@ export default function NotificationsScreen() {
     } else if (notification.type === 'friend_accept') {
       router.push({ pathname: '/profile', params: { uid: notification.fromUid } });
     } else if (notification.type === 'pet_summon') {
-      router.push('/(tabs)/letters');
+      router.push({ pathname: '/letters/with/[uid]', params: { uid: notification.fromUid } });
     } else if (notification.letterId) {
       router.push(`/letters/${notification.letterId}`);
     } else if (notification.dayId) {

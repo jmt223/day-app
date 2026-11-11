@@ -15,8 +15,6 @@ export type TermsContent = {
   sections: TermsSection[];
 };
 
-export const TERMS_EFFECTIVE_DATE = '2026-09-07';
-
 const ko: TermsContent = {
   title: 'DAY 이용약관',
   effectiveDateLabel: '시행일: 2026년 9월 7일',

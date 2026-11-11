@@ -1,8 +1,8 @@
 import {
   collection,
+  deleteDoc,
   doc,
   getDocs,
-  increment,
   limit,
   orderBy,
   query,
@@ -61,7 +61,8 @@ export async function addComment(
     body: trimmedBody,
     createdAt: serverTimestamp(),
   });
-  batch.update(doc(database, 'days', dayId), { commentCount: increment(1) });
+  // 댓글 수(commentCount)는 서버(functions/index.js의 onCommentWritten)가
+  // 실제 댓글 개수를 다시 세서 쓴다.
   // "내가 쓴 댓글" 목록용 사본 — MyCommentEntry 타입 주석 참고.
   batch.set(doc(database, 'users', author.uid, 'myComments', commentRef.id), {
     commentId: commentRef.id,
@@ -83,14 +84,13 @@ export async function addComment(
   }
 }
 
-/** 본인이 쓴 댓글만 지울 수 있다(보안 규칙에서도 authorId로 확인). */
-export async function deleteComment(dayId: string, commentId: string, authorId: string): Promise<void> {
+/** 댓글을 지운다 — 댓글 작성자 본인, 또는 그 DAY의 작성자(내 글에 달린 댓글
+ * 정리)만 가능하다(보안 규칙에서 확인). 댓글 수와 작성자의 "내가 쓴 댓글"
+ * 사본은 서버(onCommentWritten)가 정리한다 — DAY 작성자는 남의 사본을 직접
+ * 지울 권한이 없어서다. */
+export async function deleteComment(dayId: string, commentId: string): Promise<void> {
   const database = requireDb();
-  const batch = writeBatch(database);
-  batch.delete(doc(database, 'days', dayId, 'comments', commentId));
-  batch.update(doc(database, 'days', dayId), { commentCount: increment(-1) });
-  batch.delete(doc(database, 'users', authorId, 'myComments', commentId));
-  await batch.commit();
+  await deleteDoc(doc(database, 'days', dayId, 'comments', commentId));
 }
 
 export type MyCommentsPage = { comments: MyCommentEntry[]; nextCursor: number | null };

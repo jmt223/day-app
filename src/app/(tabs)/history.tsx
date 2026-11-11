@@ -11,12 +11,14 @@ import { Segmented } from '@/components/segmented';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { TimelineCard } from '@/components/timeline-card';
+import { UpdatedFriendsStrip, type UpdatedFriend } from '@/components/updated-friends-strip';
 import { Radius, Spacing } from '@/constants/theme';
 import { useAuth } from '@/context/auth-context';
 import { listFriends } from '@/data/friends';
 import {
   listFriendDaysInMonth,
   listFriendDaysTimeline,
+  listFriendUpdates,
   listMyDaysInMonth,
   listMyDaysTimelinePage,
   listMyDrafts,
@@ -26,6 +28,7 @@ import { useLocale } from '@/hooks/use-locale';
 import { useTheme } from '@/hooks/use-theme';
 import type { DayDoc } from '@/types/day';
 import type { FriendEntry, FriendGroup, UserProfile } from '@/types/user';
+import { loadSeenMap, markFriendHistorySeen } from '@/utils/friend-update-seen';
 import {
   formatDayLabelShort,
   formatYearMonth,
@@ -61,6 +64,7 @@ export default function HistoryScreen() {
   const [monthDays, setMonthDays] = useState<DayDoc[]>([]);
   const [timelineDays, setTimelineDays] = useState<DayDoc[]>([]);
   const [drafts, setDrafts] = useState<DayDoc[]>([]);
+  const [updatedFriends, setUpdatedFriends] = useState<UpdatedFriend[]>([]);
   const [viewedProfile, setViewedProfile] = useState<UserProfile | null>(null);
   const [selectedDateLabel, setSelectedDateLabel] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -106,6 +110,8 @@ export default function HistoryScreen() {
       setMonthDays(monthList);
       setTimelineDays(timeline);
       setDrafts([]);
+      // 이 친구의 연혁을 열어봤으니 "업데이트한 친구"의 새 소식 점을 지운다.
+      await markFriendHistorySeen(user.uid, viewingFriendUid);
       return;
     }
     const [friendList, groupList, monthList, timelinePage, draftList] = await Promise.all([
@@ -122,7 +128,32 @@ export default function HistoryScreen() {
     setTimelineCursor(timelinePage.nextCursor);
     setTimelineHasMore(!!timelinePage.nextCursor);
     setDrafts(draftList);
+
+    // 최근 연혁에 새 DAY를 올린 친구들(업데이트한 친구). 실패해도 내 연혁은
+    // 그대로 보여야 하니 따로 잡는다.
+    try {
+      const [updates, seen] = await Promise.all([
+        listFriendUpdates(friendList.map((f) => f.friendUid)),
+        loadSeenMap(user.uid),
+      ]);
+      const byUid = new Map(friendList.map((f) => [f.friendUid, f]));
+      setUpdatedFriends(
+        updates
+          .filter((u) => byUid.has(u.uid))
+          .map((u) => {
+            const f = byUid.get(u.uid)!;
+            return { uid: u.uid, nickname: f.nickname, photoURL: f.photoURL, latestMs: u.latestMs, unseen: u.latestMs > (seen[u.uid] ?? 0) };
+          })
+      );
+    } catch (error) {
+      console.error('업데이트한 친구를 불러오지 못했어요', error);
+    }
   }, [user, year, month, viewingFriendUid]);
+
+  function openFriendHistory(friendUid: string) {
+    setUpdatedFriends((prev) => prev.map((f) => (f.uid === friendUid ? { ...f, unseen: false } : f)));
+    router.push({ pathname: '/(tabs)/history', params: { friendUid } });
+  }
 
   async function loadMoreTimeline() {
     if (!user || loadingMoreTimeline) return;
@@ -274,6 +305,8 @@ export default function HistoryScreen() {
               </ThemedText>
             </ThemedView>
           )}
+
+          {!viewingFriendUid && <UpdatedFriendsStrip friends={updatedFriends} onPress={openFriendHistory} />}
 
           {!viewingFriendUid && drafts.length > 0 && (
             <View style={styles.draftsSection}>
@@ -458,7 +491,8 @@ const styles = StyleSheet.create({
   container: {
     padding: Spacing.four,
     gap: Spacing.three,
-    paddingBottom: Spacing.six,
+    // 오른쪽 아래 글쓰기 버튼(FAB)에 마지막 줄이 가리지 않게 넉넉히 둔다.
+    paddingBottom: Spacing.six + Spacing.five,
   },
   backToMineRow: {
     flexDirection: 'row',

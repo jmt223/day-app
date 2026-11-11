@@ -800,14 +800,17 @@ const styles = StyleSheet.create({
   },
   dateChipRow: {
     flexDirection: 'row',
+    // 오전 10시 전엔 어제/오늘/내일/직접 선택 4개라 좁은 폰에선 한 줄에 안
+    // 들어간다 — 줄을 넘겨서라도 전부 보이게 한다(예전엔 화면 밖으로 잘렸다).
+    flexWrap: 'wrap',
     gap: Spacing.two,
   },
   dateChip: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.two,
-    paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.three,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two + 4,
     borderRadius: Radius.medium,
   },
   dateSubLabel: {

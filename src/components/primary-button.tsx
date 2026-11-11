@@ -10,13 +10,16 @@ type Props = {
   loading?: boolean;
   disabled?: boolean;
   variant?: 'solid' | 'outline';
+  /** 펫 편지 화면은 목업처럼 초록(leaf) 버튼을 쓴다. 나머지는 기본 테라코타. */
+  tone?: 'accent' | 'leaf';
   style?: ViewStyle;
 };
 
-export function PrimaryButton({ label, onPress, loading, disabled, variant = 'solid', style }: Props) {
+export function PrimaryButton({ label, onPress, loading, disabled, variant = 'solid', tone = 'accent', style }: Props) {
   const theme = useTheme();
   const isDisabled = disabled || loading;
   const solid = variant === 'solid';
+  const onTone = tone === 'leaf' ? 'onLeaf' : 'onAccent';
 
   return (
     <Pressable
@@ -25,14 +28,14 @@ export function PrimaryButton({ label, onPress, loading, disabled, variant = 'so
       style={[
         styles.base,
         solid
-          ? { backgroundColor: theme.accent, opacity: isDisabled ? 0.6 : 1 }
+          ? { backgroundColor: theme[tone], opacity: isDisabled ? 0.6 : 1 }
           : { backgroundColor: 'transparent', borderWidth: 1, borderColor: theme.line, opacity: isDisabled ? 0.6 : 1 },
         style,
       ]}>
       {loading ? (
-        <ActivityIndicator color={solid ? theme.onAccent : theme.ink} />
+        <ActivityIndicator color={solid ? theme[onTone] : theme.ink} />
       ) : (
-        <ThemedText type="button" color={solid ? 'onAccent' : 'ink'}>
+        <ThemedText type="button" color={solid ? onTone : 'ink'}>
           {label}
         </ThemedText>
       )}

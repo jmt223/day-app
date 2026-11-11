@@ -27,7 +27,7 @@ Notifications.setNotificationHandler({
  *  - 시뮬레이터/에뮬레이터: 실기기가 아니면 푸시 토큰 자체가 발급 안 된다.
  *  - 알림 권한 거부: 사용자가 명시적으로 거부한 것이니 강요하지 않는다.
  */
-export async function registerForPushNotifications(uid: string): Promise<void> {
+export async function registerForPushNotifications(uid: string, legacyTokensPresent = false): Promise<void> {
   try {
     if (Platform.OS === 'web' || !Device.isDevice) return;
 
@@ -46,7 +46,7 @@ export async function registerForPushNotifications(uid: string): Promise<void> {
     }
 
     const { data: token } = await Notifications.getExpoPushTokenAsync({ projectId });
-    await addPushToken(uid, token);
+    await addPushToken(uid, token, legacyTokensPresent);
 
     if (Platform.OS === 'android') {
       await Notifications.setNotificationChannelAsync('default', {

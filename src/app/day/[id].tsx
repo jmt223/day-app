@@ -409,7 +409,7 @@ export default function DayDetailScreen() {
     const ok = await confirmAsync(t('dayDetail.commentDeleteConfirmTitle'), t('dayDetail.commentDeleteConfirmMessage'));
     if (!ok) return;
     try {
-      await deleteComment(day.id, comment.id, comment.authorId);
+      await deleteComment(day.id, comment.id);
       setComments((prev) => prev.filter((c) => c.id !== comment.id));
       setDay((prev) => (prev ? { ...prev, commentCount: Math.max(0, prev.commentCount - 1) } : prev));
     } catch {
@@ -635,17 +635,25 @@ export default function DayDetailScreen() {
                         </ThemedText>
                       </View>
                     </Pressable>
-                    {user?.uid === comment.authorId ? (
-                      <Pressable onPress={() => handleDeleteComment(comment)} hitSlop={8}>
-                        <Ionicons name="trash-outline" size={15} color={theme.muted} />
-                      </Pressable>
-                    ) : (
-                      <Pressable
-                        onPress={() => setReportTarget({ type: 'comment', id: comment.id, authorUid: comment.authorId })}
-                        hitSlop={8}>
-                        <Ionicons name="flag-outline" size={15} color={theme.muted} />
-                      </Pressable>
-                    )}
+                    <View style={styles.commentActions}>
+                      {/* 내 댓글이거나, 내 DAY에 달린 댓글이면 지울 수 있다. */}
+                      {(user?.uid === comment.authorId || isAuthor) && (
+                        <Pressable
+                          onPress={() => handleDeleteComment(comment)}
+                          hitSlop={8}
+                          accessibilityLabel={t('dayDetail.commentDelete')}>
+                          <Ionicons name="trash-outline" size={15} color={theme.muted} />
+                        </Pressable>
+                      )}
+                      {user?.uid !== comment.authorId && (
+                        <Pressable
+                          onPress={() => setReportTarget({ type: 'comment', id: comment.id, authorUid: comment.authorId })}
+                          hitSlop={8}
+                          accessibilityLabel={t('dayDetail.report')}>
+                          <Ionicons name="flag-outline" size={15} color={theme.muted} />
+                        </Pressable>
+                      )}
+                    </View>
                   </View>
                 ))}
               </View>
@@ -1050,6 +1058,12 @@ const styles = StyleSheet.create({
   commentTextBlock: {
     flex: 1,
     gap: 3,
+  },
+  commentActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.three,
+    paddingTop: 2,
   },
   commentInputRow: {
     flexDirection: 'row',

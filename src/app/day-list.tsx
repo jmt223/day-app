@@ -3,10 +3,11 @@ import { useCallback, useEffect, useLayoutEffect, useState } from 'react';
 import { ActivityIndicator, FlatList, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { DayListRow } from '@/components/day-list-row';
 import { EmptyState } from '@/components/empty-state';
 import { LoadingView } from '@/components/loading-view';
 import { TimelineCard } from '@/components/timeline-card';
-import { Spacing } from '@/constants/theme';
+import { Radius, Spacing } from '@/constants/theme';
 import {
   listFriendsFeedPage,
   listWorldDaysNewPage,
@@ -117,9 +118,21 @@ export default function DayListScreen() {
           data={days}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.list}
-          renderItem={({ item, index }) => (
-            <TimelineCard day={item} isLast={index === days.length - 1} onPress={() => router.push(`/day/${item.id}`)} />
-          )}
+          renderItem={({ item, index }) =>
+            // "새로운 DAY"는 홈과 같은 게시판형 목록(제목 [댓글수])으로 보여준다.
+            type === 'new' ? (
+              <View
+                style={[
+                  { backgroundColor: theme.surface },
+                  index === 0 && styles.boardTop,
+                  index === days.length - 1 && styles.boardBottom,
+                ]}>
+                <DayListRow day={item} isLast={index === days.length - 1} onPress={() => router.push(`/day/${item.id}`)} />
+              </View>
+            ) : (
+              <TimelineCard day={item} isLast={index === days.length - 1} onPress={() => router.push(`/day/${item.id}`)} />
+            )
+          }
           onEndReachedThreshold={0.4}
           onEndReached={loadMore}
           ListFooterComponent={
@@ -140,6 +153,14 @@ const styles = StyleSheet.create({
   list: {
     padding: Spacing.four,
     paddingBottom: Spacing.six,
+  },
+  boardTop: {
+    borderTopLeftRadius: Radius.large,
+    borderTopRightRadius: Radius.large,
+  },
+  boardBottom: {
+    borderBottomLeftRadius: Radius.large,
+    borderBottomRightRadius: Radius.large,
   },
   footer: {
     paddingVertical: Spacing.four,

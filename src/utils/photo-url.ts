@@ -1,7 +1,9 @@
+import { functionUrl } from '@/lib/functions-url';
+
 // servePhoto Cloud Function(functions/index.js)의 주소. asia-northeast3
 // 리전의 2nd gen 함수라 firebase-functions SDK 없이도 그냥 fetch로 부를 수
 // 있는 평범한 HTTPS 엔드포인트다.
-const SERVE_PHOTO_URL = 'https://asia-northeast3-day-app-6e618.cloudfunctions.net/servePhoto';
+const SERVE_PHOTO_URL = functionUrl('servePhoto');
 
 /**
  * DAY 사진을 가리키는 값(Storage 경로, 혹은 예전에 저장해둔 전체 다운로드

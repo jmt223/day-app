@@ -11,14 +11,13 @@ export type UserProfile = {
   photoURL: string | null;
   bio: string;
   dayCount: number;
-  /** 지금 갖고 있는 펫 수(constants/pets.ts의 MAX_PETS까지). 이 필드가
-   * 없는 계정(이 기능 이전 가입자)은 아직 펫이 없는 것으로 취급하고,
-   * pets.tsx 진입 시 그 자리에서 첫 펫을 지급한다(data/pets.ts의
-   * grantStarterPet). */
+  /** 지금 갖고 있는 펫 수(constants/pets.ts의 MAX_PETS까지). 없으면 아직
+   * 펫이 없는 것 — 펫이 필요한 화면에서 첫 펫의 종을 직접 고르게 한다
+   * (components/species-picker.tsx). */
   petCount?: number;
-  /** 이 기기/브라우저로 로그인해서 얻은 Expo 푸시 토큰들(여러 기기 지원).
-   * 서버(functions/index.js의 sendPushOnNotification)가 새 알림이 생길 때
-   * 이 배열로 실제 푸시를 보낸다. */
+  /** 예전 위치의 Expo 푸시 토큰. 이 문서는 로그인한 누구나 읽을 수 있어서
+   * 지금은 users/{uid}/private/push로 옮겼다 — 남아 있으면 로그인할 때
+   * 지운다(utils/push-notifications.ts). */
   pushTokens?: string[];
   /** 알림 종류별로 푸시를 받을지 끌 수 있는 설정. 값이 없는 종류는 기본
    * true(받음)로 취급한다 — 그래야 이 필드가 생기기 전에 가입한 계정도
@@ -42,9 +41,9 @@ export type UserProfile = {
  * 사용자 입장에서 둘 다 "친구 관련 알림"이라 하나로 합쳤다. memory는
  * "회고 알림"(1년 전 오늘 등록한 DAY를 다시 보여주는 알림, 매일 자정
  * 서버에서 자동으로 확인해서 보낸다 — functions/index.js의
- * sendMemoryNotifications 참고)이다. letter는 편지 도착/답장/타임아웃/
- * 호출(pet_summon) 4종을 하나로 묶는다 — 전부 "펫 편지함" 관련 알림이라
- * 세부적으로 나눠 끄게 하면 설정 화면만 복잡해진다. */
+ * sendMemoryNotifications 참고)이다. letter는 편지 도착/답장/복귀/호출/
+ * 재문의 같은 펫 편지 알림 전부를 하나로 묶는다 — 세부적으로 나눠 끄게 하면
+ * 설정 화면만 복잡해진다. */
 export type NotificationSettings = {
   tag: boolean;
   comment: boolean;
@@ -115,7 +114,11 @@ export type NotificationType =
   | 'letter_received'
   | 'letter_replied'
   | 'letter_expired'
-  | 'pet_summon';
+  | 'pet_summon'
+  | 'summon_accepted'
+  | 'pet_early_return'
+  | 'pet_overstay'
+  | 'letter_reask';
 
 export type AppNotification = {
   id: string;
@@ -128,10 +131,13 @@ export type AppNotification = {
   dayTitle?: string;
   /** memory(회고 알림)에서만 쓴다 — 몇 년 전 오늘 쓴 DAY인지. */
   yearsAgo?: number;
-  /** letter_received/letter_replied/letter_expired에서만 쓴다 — 눌렀을 때
-   * 이동할 편지. pet_summon은 특정 편지와 무관해서(그냥 편지함으로
-   * 이동) 비워둔다. */
+  /** 편지 관련 알림에서 쓴다 — 눌렀을 때 이동할 편지(그 사람과의 대화창으로
+   * 열린다). pet_summon은 특정 편지와 무관해서(그냥 편지함으로 이동) 비워둔다. */
   letterId?: string;
+  /** 편지를 나르는 펫 이름(서버가 채운다) — "두부가 기다리다 먼저 돌아왔어요". */
+  petName?: string;
+  /** letter_reask에서만: 어느 메시지를 다시 물었는지. */
+  part?: 'outbound' | 'reply';
   read: boolean;
   createdAt: Timestamp | null;
 };

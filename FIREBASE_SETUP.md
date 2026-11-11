@@ -1,16 +1,17 @@
 # Firebase 설정 가이드
 
-DAY 앱은 Firebase(Authentication, Firestore, Storage)를 백엔드로 사용합니다. 아래 순서대로 한 번만 설정하면 됩니다.
+DAY 앱은 Firebase(Authentication, Firestore, Storage, Cloud Functions, Hosting)를 백엔드로 사용합니다. 처음 한 번만 아래 순서대로 설정하면 됩니다.
 
 ## 1. Firebase 프로젝트 만들기
 
 1. https://console.firebase.google.com 에서 새 프로젝트를 만듭니다.
-2. 웹 앱을 하나 등록합니다. 콘솔 개편으로 위치가 자주 바뀌는데, 안 보이면 왼쪽 위 ⚙️(톱니바퀴) → **프로젝트 설정** → **일반** 탭 → **내 앱** 섹션 → **앱 추가** → **웹**을 선택하면 됩니다. (Firebase Hosting 체크박스는 필요 없습니다.)
-3. "Firebase SDK 추가" 단계에서 **npm 사용** 탭을 선택하면 `firebaseConfig` 코드 블록이 나옵니다. 이 값을 복사해둡니다.
+2. 웹 앱을 하나 등록합니다(⚙️ 프로젝트 설정 → 일반 → 내 앱 → 앱 추가 → 웹).
+3. "Firebase SDK 추가" 단계의 **npm 사용** 탭에 나오는 `firebaseConfig` 값을 복사해둡니다.
+4. 요금제를 **Blaze(종량제)**로 바꿉니다 — Cloud Functions와 Cloud Scheduler에 필요합니다. 무료 사용량 안에서는 보통 비용이 거의 나오지 않습니다.
 
 ## 2. 환경변수 채우기
 
-프로젝트 루트의 `.env.example`을 `.env`로 복사하고, 1번에서 확인한 값을 채워 넣습니다.
+프로젝트 루트의 `.env.example`을 `.env`로 복사하고 채웁니다(`.env`는 git에 올라가지 않습니다).
 
 ```
 EXPO_PUBLIC_FIREBASE_API_KEY=...
@@ -19,81 +20,117 @@ EXPO_PUBLIC_FIREBASE_PROJECT_ID=...
 EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET=...
 EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=...
 EXPO_PUBLIC_FIREBASE_APP_ID=...
+EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID=...     # 구글 로그인(선택)
+EXPO_PUBLIC_KAKAO_REST_API_KEY=...       # 카카오 로그인(선택)
 ```
 
-`.env`는 git에 커밋되지 않습니다.
+카카오 로그인을 쓰면 서버에도 같은 키가 필요합니다: `functions/.env`에 `KAKAO_REST_API_KEY=...` 한 줄을 넣습니다.
 
-## 3. Authentication 켜기
+`.env`를 채우지 않고 실행하면 앱은 "Firebase 설정이 필요해요" 안내 화면만 보여줍니다.
 
-Firebase 콘솔 > Authentication > Sign-in method에서 **이메일/비밀번호**를 사용 설정합니다.
+## 3. 로그인 방법 켜기
 
-(소셜 로그인은 1차 MVP에는 포함하지 않았습니다. 아래 "알려진 제약사항" 참고)
+Firebase 콘솔 → Authentication → Sign-in method:
 
-## 4. Firestore Database 만들기
+- **이메일/비밀번호**: 사용 설정. 가입 후 이메일 인증을 마쳐야 글·댓글·편지를 쓸 수 있습니다(보안 규칙에서 확인).
+- **Google**: 사용 설정 후, Google Cloud Console의 "OAuth 2.0 클라이언트 ID(웹 애플리케이션)"를 `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID`에 넣습니다.
+- **Kakao**: Firebase 기본 제공자가 아니라서 Cloud Function(`exchangeKakaoCode`)이 커스텀 토큰을 만들어 줍니다. Kakao Developers에서 앱을 만들고 REST API 키를 위 두 `.env`에 넣은 뒤, 카카오 로그인 Redirect URI에 앱 주소(웹은 `https://<도메인>`)를 등록합니다. 카카오 콘솔에서 **Client Secret**을 켜고 서버에서만 쓰도록 바꾸면 더 안전합니다(지금 코드는 Client Secret 없이 동작).
 
-Firebase 콘솔 왼쪽 메뉴가 "데이터베이스 및 스토리지" 같은 카테고리로 묶여있을 수 있습니다. 그 안에서 **Firestore**(Realtime Database 아님)를 선택 → **Standard 버전** → 데이터베이스 만들기. 위치는 가능하면 `asia-northeast3(서울)`을 권장하지만, 프로젝트에 이미 리전이 고정되어 선택지가 안 뜨면 그냥 기본값으로 진행해도 무방합니다.
+## 4. Firestore · Storage 만들기
 
-이 저장소에는 이미 작성된 보안 규칙(`firestore.rules`)과 인덱스 정의(`firestore.indexes.json`)가 있습니다. Firebase CLI로 그대로 배포하세요.
+- **Firestore**(Standard) 데이터베이스를 만듭니다. 위치는 `asia-northeast3(서울)` 권장.
+- **Storage**를 시작합니다.
 
-## 5. Storage 만들기
+보안 규칙(`firestore.rules`, `storage.rules`)과 인덱스(`firestore.indexes.json`)는 이 저장소에 이미 있습니다.
 
-같은 카테고리 안의 **Storage** → 시작하기. 마찬가지로 `storage.rules`가 이미 준비되어 있습니다.
-
-⚠️ 최근 Google 정책상 Storage를 만들려면 프로젝트가 **Blaze(종량제) 요금제**여야 할 수 있습니다. 업그레이드해도 무료 사용량 한도(5GB 저장 등)는 그대로라 일반적인 개발 단계에서는 비용이 발생하지 않습니다. 카드 등록이 꺼려지면 "무료 위치" 옵션이 뜨는지 먼저 확인해보세요 — 뜨면 업그레이드 없이도 생성됩니다.
-
-## 6. 규칙 · 인덱스 배포 (Firebase CLI)
+## 5. 배포
 
 ```bash
 npm install -g firebase-tools
 firebase login
-firebase use --add        # 방금 만든 프로젝트 선택
-firebase deploy --only firestore:rules,firestore:indexes,storage
-```
+firebase use --add                     # 프로젝트 선택
 
-`firebase init`을 새로 실행할 필요는 없습니다. 이미 `firestore.rules`, `firestore.indexes.json`, `storage.rules`, `firebase.json`이 준비되어 있습니다.
-
-DAY 사진은 이제 공개 다운로드 URL 없이, `functions/` 폴더의 `servePhoto` Cloud Function을 통해서만 서빙됩니다. 이 프로젝트를 새로 세팅하는 경우 규칙과 함께 함수도 배포해야 합니다(Blaze 요금제 필요):
-
-```bash
+# 규칙·인덱스·함수 (함수는 functions/ 폴더)
 firebase deploy --only firestore:rules,firestore:indexes,storage,functions
+
+# 웹 앱
+npx expo export --platform web         # dist/ 생성
+firebase deploy --only hosting
 ```
 
-## 7. 앱 실행
+새 인덱스는 만들어지는 데 몇 분 걸릴 수 있습니다. 그동안 해당 화면(대화창 등)에서 "index is building" 오류가 잠깐 날 수 있어요.
+
+규칙과 함수는 **같이** 배포해야 합니다 — 좋아요/댓글/작성 수는 이제 서버(함수)만 세고 클라이언트는 못 바꾸게 규칙이 막고 있어서, 한쪽만 올라가면 숫자가 안 바뀌거나 동작이 어긋납니다.
+
+## 로컬 에뮬레이터
+
+운영 데이터를 건드리지 않고 규칙·함수를 같이 돌려볼 수 있습니다(Java 21 필요). 프로젝트 ID를 `demo-`로 시작하게 주면 실제 Firebase에 절대 접속하지 않습니다.
 
 ```bash
-npx expo start
+firebase emulators:start --only auth,firestore,functions --project demo-day-app
+
+# 다른 터미널에서, 앱을 에뮬레이터에 붙여 실행
+EXPO_PUBLIC_USE_FIREBASE_EMULATOR=1 EXPO_PUBLIC_FIREBASE_PROJECT_ID=demo-day-app npx expo start --web
 ```
 
-터미널에 뜨는 QR코드를 Expo Go 앱으로 스캔하거나, `i`/`a`를 눌러 시뮬레이터로 실행하세요. `w`를 누르면 웹으로도 열립니다.
-
-`.env`를 채우지 않고 실행하면 앱이 "Firebase 설정이 필요해요" 안내 화면만 보여주고 정상 동작하지 않습니다.
+에뮬레이터에선 1분마다 도는 스케줄 함수(`expireOverdueLetters`)가 자동 실행되지 않습니다. `functions/letters-core.js`의 `sweepLetters()`를 직접 불러서 확인하세요.
 
 ---
 
-## 알려진 제약사항 (1차 MVP)
+## 펫 편지
 
-- **소셜 로그인(Apple/Google/Kakao)**: 실제 OAuth 클라이언트 등록이 필요해 이번 빌드에는 포함하지 않았습니다. 이메일/비밀번호 로그인은 완전히 동작합니다.
-- **DAY 작성 날짜 선택**: 작성 시간 제한(당일 00:00~다음날 10:00 KST) 때문에 실제로 고를 의미가 있는 날짜는 "오늘"과, 아직 마감 전이라면 "어제"뿐입니다. 그래서 달력형 날짜 선택기 대신 오늘/어제 두 버튼으로 단순화했습니다 (네이티브 달력 선택기는 웹에서 아예 지원되지 않는 라이브러리라 원래 계획을 바꿨습니다).
-- **친구 추가는 일방향입니다**: 이메일로 검색해서 내 목록에 바로 추가되는 방식이고(카톡 주소록과 비슷), 상대방에게 알림이 가거나 수락을 받는 절차는 없습니다. PRD에도 이 부분은 구체적으로 정해져 있지 않아 가장 단순한 방식으로 구현했습니다.
-- **회원 탈퇴**: Authentication 계정 삭제 전에 프로필(닉네임/자기소개/사진)을 "탈퇴한 사용자"로 초기화하고 이메일 매핑·아바타 파일도 지우지만, 그 사용자가 작성한 DAY/댓글 문서 자체는 지우지 않습니다(좋아요/댓글 수 등 다른 사람과 얽힌 데이터 정합성이 깨지는 걸 피하려고 의도적으로 남겨둠). 완전한 캐스케이드 삭제가 필요하면 Cloud Functions로 추가할 수 있습니다.
-- **2차/3차 개발 항목** (PRD 13장 기준): 친구 마인드맵 UI, 추천 알고리즘, 검색/해시태그, 공동 작성 DAY, 회고 알림(On this day), D-Day 카운트다운, 타임캡슐 DAY, SHOP 결제, 연말 결산 카드, 인생연표 PDF 내보내기, 프리미엄 구독, 기록 히트맵, 음성 메모는 이번 빌드 범위에 포함되어 있지 않습니다.
+### 흐름
 
-## 이 문서 작성 이후 고친 것들 (자체 점검)
+1. **펫 데려오기** — 첫 펫의 종은 직접 고릅니다(14종: 강아지, 고양이, 새, 말, 소, 돼지, 쥐, 호랑이, 토끼, 용, 뱀, 양, 원숭이, 닭). 성격(서두르는/여유로운/꼼꼼한/장난꾸러기/수줍은/듬직한)은 데려올 때 무작위. DAY를 7개 쓰면 두 번째 펫(최대 2마리).
+2. **보내기** — 대화창에서 펫을 고르고 답장 대기시간(5분/15분/30분/1시간/3시간/6시간/12시간/24시간)을 정해 보냅니다. 상대 대화창에 바로 도착하고, 대기시간은 도착 시점부터 셉니다.
+3. **답장** — 상대는 자기 펫 없이, 와 있는 펫에 답장을 실어 보냅니다. 답장하면 펫이 즉시 돌아옵니다.
+4. **복귀** — 답장이 없으면 시간이 끝날 때 자동 복귀(최대 1분 지연). 서두르는 펫은 10% 확률로 50~80% 시점에 먼저 돌아오고, 여유로운 펫은 10% 확률로 시간이 끝나도 계속 머뭅니다(답장을 받거나 주인이 부를 때까지).
+5. **일로 와** — 주인은 언제든 펫을 불러들일 수 있습니다. 메시지는 대화창에 남고 대기 표시만 사라집니다.
+6. **펫 보내줘** — 펫이 이미 돌아갔으면 상대에게 호출을 보낼 수 있습니다(같은 상대에게 24시간에 한 번). 받은 사람이 수락하면서 펫·대기시간을 고르면, 그 펫이 메시지 없이 가서 호출한 사람의 메시지를 기다립니다.
+7. **손상** — 보내는 메시지와 돌아오는 답장이 각각 따로 추첨됩니다. 메시지를 글자 기준으로 6칸(앞 절반 3칸 + 뒤 절반 3칸)으로 나눠 손상 칸 수(1칸 65% … 6칸 1%)와 위치를 정하고, 그 칸의 글자를 'ㅁ'으로 가린 뒤 펫 종의 흔적(침 번짐, 발톱 자국, 그을림 …)을 입힙니다. 결과는 서버에 저장돼 다시 열거나 다른 기기에서 봐도 같습니다. 빈 칸(짧은 메시지)이나 공백만 있는 칸은 추첨에서 뺍니다.
+8. **뭐라고 했어?** — 손상된 메시지를 받은 사람은 메시지당 한 번 보낸 사람에게 다시 물어볼 수 있습니다(알림만 감, 원문 자동 공개·자동 재전송 없음).
+9. **친밀도** — 펫마다 0~100. 배달 후 복귀 +1(하루 3번), 주인의 쓰다듬기·간식 +1(각각 하루 1번), 하루 최대 +5. 최종 손상 확률 = 성격 기본값 − 친밀도 × 0.04%p(최소 1%). 상대방의 쓰다듬기·간식은 반응과 기록에만 남습니다.
 
-앱을 만든 뒤 실제 Firebase 프로젝트에 대고 자동화 테스트를 돌리면서 발견한 문제들을 고쳤습니다. 자세한 내용은 대화 요약을 참고하세요 — 요점만 적으면:
+### 확률·수치 바꾸기 (재배포 없이)
 
-- 요일/달력 계산 버그(모든 날짜가 하루 어긋나게 표시되던 문제) 수정
-- 웹에서 로그인/삭제/확인 알림창이 아무 반응 없던 문제 수정
-- 웹에서 DAY 작성 시 날짜를 못 바꾸던 문제 수정 (달력 위젯 → 오늘/어제 버튼으로 교체)
-- 회원가입 시 드물게 닉네임이 이메일 앞부분으로 잘못 저장될 수 있던 경쟁 상태(race condition) 수정
-- 그룹 삭제 기능이 아예 없던 것 추가, 친구가 없는 빈 그룹이 목록에서 숨겨지던 문제 수정
-- 비공개 DAY를 다른 사람이 좋아요/댓글 카운트를 조작할 수 있던 보안 규칙 허점 수정
-- DAY를 못 불러왔을 때 무한 로딩만 뜨던 문제 수정, 여러 화면에서 에러가 조용히 씹혀 원인 파악이 안 되던 문제 수정
-- **보안 취약점 일괄 점검 및 수정** (IDOR 등):
-  - DAY 수정 API로 작성 시간 제한(date)·사진 목록(photoURLs)을 우회 변경할 수 있던 문제
-  - 좋아요/댓글 수를 임의 값으로 덮어쓸 수 있던 문제 → ±1 증감만 허용
-  - 프로필의 dayCount를 임의 값으로 덮어쓸 수 있던 문제 → ±1 증감만 허용
-  - 모든 유저의 이메일이 로그인한 사람이면 누구나 조회 가능하던 문제 → 필드 자체를 제거
-  - 존재하지 않는 dayId로 아무 유저에게나 알림을 만들 수 있던 문제 → 실제 존재하는 DAY만 허용
-  - 계정 탈퇴 시 프로필·이메일 매핑·아바타가 그대로 남아있던 문제 → 탈퇴 시 정리하도록 수정
-  - **DAY 사진 접근 권한 재설계**: 예전엔 Storage 보안 규칙이 "로그인만 하면 열람 가능" 수준이라 나만보기 사진도 경로를 알면 보였고, 친구공개/특정그룹은 아예 뷰어별 검증이 불가능했다(Storage 규칙이 Firestore를 실시간 대조 못 함). 또한 한번 발급된 공개 다운로드 URL은 보안 규칙과 무관하게 유출되면 영원히 유효했다. `servePhoto` Cloud Function을 만들어서 사진을 공개 URL 없이, 요청마다 Firestore의 공개범위·친구관계·그룹 소속을 서버가 직접 확인한 뒤에만 서빙하도록 바꿔서 두 문제를 모두 해결했다.
+Firestore에 `config/petRules` 문서를 만들면 `functions/pet-config.js`의 기본값 위에 덮어씁니다(최대 1분 캐시). 넣은 필드만 바뀌고, 타입이 틀린 값은 무시합니다.
+
+```json
+{
+  "personalities": {
+    "hasty": { "baseDamagePercent": 6, "earlyReturnChancePercent": 10, "earlyReturnMinRatio": 0.5, "earlyReturnMaxRatio": 0.8 },
+    "easygoing": { "baseDamagePercent": 5, "overstayChancePercent": 10 },
+    "careful": { "baseDamagePercent": 3 },
+    "playful": { "baseDamagePercent": 8 },
+    "timid": { "baseDamagePercent": 5 },
+    "reliable": { "baseDamagePercent": 4 }
+  },
+  "intimacyDamageReductionPerPoint": 0.04,
+  "minDamagePercent": 1,
+  "damageCellWeights": [65, 20, 8, 4, 2, 1],
+  "intimacy": { "max": 100, "deliveryGain": 1, "deliveryGainDailyMax": 3, "petGain": 1, "snackGain": 1, "dailyMax": 5 }
+}
+```
+
+꼼꼼한·장난꾸러기·수줍은·듬직한의 기본 손상 확률은 기획서에 수치가 없어서 개발 쪽 임시값입니다.
+
+### 아직 정해지지 않아서 구현하지 않은 것
+
+- 3번째 이후 펫 획득(뽑기)과 최대 보유 수 — 지금은 첫 펫 + 미션 1마리
+- 간식의 획득·소모(재화) — 지금은 하루 1번 무료
+- 서두르는/여유로운 외 성격의 예외 행동
+- 펫 일러스트 — 지금은 종별 이모지 + 파스텔 배경(그림이 생기면 `src/components/pet-avatar.tsx`만 바꾸면 됨)
+
+---
+
+## 보안 메모 (자체 점검 이력)
+
+- 좋아요/댓글/작성 수는 서버 트리거가 실제 문서 수를 다시 세서 쓴다. 클라이언트의 ±1 쓰기는 규칙에서 막는다(예전엔 +1 요청만 반복해 숫자를 부풀릴 수 있었다).
+- 펫 문서는 `petCount` +1과 같은 배치로만 만들 수 있다(예전엔 펫을 무한정 만들어 도배 방지 장치를 무력화할 수 있었다). 두 번째 펫은 서버가 센 `dayCount ≥ 7`일 때만.
+- 푸시 토큰은 본인만 읽는 `users/{uid}/private/push`로 옮겼다(예전엔 누구나 읽는 프로필 문서에 있어 가짜 푸시를 보낼 수 있었다).
+- 좋아요/태그 알림은 (DAY, 보낸 사람)마다 한 번만 만들 수 있고, 태그 알림은 친구에게만 갈 수 있다.
+- 편지의 보낸/받는 사람 이름·사진은 실제 프로필과 같아야 한다. 대기시간은 정해진 목록만, 빈 편지는 실제 호출에 응답할 때만.
+- 펫 회수·쓰다듬기·재문의·친밀도·손상 추첨은 전부 서버(`petAction`, 트리거)에서만 한다. 문서 경로에 들어가는 id는 형식을 먼저 검사한다.
+- 프로필 사진 주소는 https만 받는다.
+- DAY 사진은 공개 URL 없이 `servePhoto` 함수가 요청마다 공개범위·친구관계를 확인한 뒤에만 서빙한다.
+- 사용하지 않는 안드로이드 권한(마이크·동영상·오디오·카메라)은 빼고 막아뒀다.

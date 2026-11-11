@@ -69,7 +69,8 @@ export function ThemeSettingProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // 하이드레이션 전(웹 정적 렌더링 직후)에는 항상 'light'로 고정해서 서버와
-  // 클라이언트 첫 렌더를 맞춘다 — 기존 use-color-scheme.web.ts와 같은 이유.
+  // 클라이언트 첫 렌더를 맞춘다(정적 HTML은 기기 테마를 모르고 만들어져서,
+  // 첫 렌더부터 다르면 하이드레이션 불일치가 난다).
   const scheme: ColorScheme = !hydrated
     ? 'light'
     : themeSetting === 'system'

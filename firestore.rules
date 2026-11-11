@@ -53,8 +53,16 @@ service cloud.firestore {
         // 이론상 추적 픽셀 악용 여지가 남지만, 구글/카카오가 실제로 쓰는
         // 도메인을 안전하게 다 나열할 방법이 없어(바뀔 수도 있고, 잘못
         // 나열하면 소셜 로그인 자체가 깨진다) 지금은 이 정도로 둔다.
-        (!('photoURL' in changed) || after.photoURL == null || after.photoURL is string) &&
+        (!('photoURL' in changed) || validPhotoURL(after.photoURL)) &&
         (!('locale' in changed) || after.locale in ['ko', 'en']);
+    }
+
+    // 프로필 사진 주소. 자체 업로드(Firebase Storage)뿐 아니라 구글/카카오
+    // 로그인이 넘겨주는 각 제공자 CDN 주소도 들어와서 도메인까지 고정할 수는
+    // 없지만, 최소한 https 주소만 받는다(http 주소는 HTTPS로 서빙되는 앱에서
+    // Mixed Content가 되고, javascript:/data: 같은 이상한 스킴도 막는다).
+    function validPhotoURL(v) {
+      return v == null || (v is string && v.size() <= 2048 && v.matches('https://.+'));
     }
 
     // 알림/친구요청 문서에 "보낸 사람 이름"을 발신자가 직접 적어 넣는데,
@@ -74,10 +82,48 @@ service cloud.firestore {
         request.resource.data.fromUid == fromUid &&
         request.resource.data.keys().hasOnly(['fromUid', 'fromNickname', 'fromPhotoURL', 'createdAt']) &&
         senderNicknameMatches(request.resource.data.fromNickname) &&
-        (request.resource.data.fromPhotoURL == null || request.resource.data.fromPhotoURL is string) &&
+        validPhotoURL(request.resource.data.fromPhotoURL) &&
         request.resource.data.createdAt is timestamp &&
         friendOfAuthor(toUid) &&
         !isBlockedBy(toUid, request.auth.uid);
+    }
+
+    // 아직 처리 안 된(handledAt 없음), 12시간 안에 온 "펫 보내줘" 호출인지.
+    // 호출에 응답해서 펫만 보내는 편지(kind == 'summon_response')는 이게 참일
+    // 때만 만들 수 있다 — 아무 상대에게나 빈 편지를 보내는 우회로를 막는다.
+    function pendingSummonFrom(requesterUid) {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid)/incomingSummons/$(requesterUid)) &&
+        !('handledAt' in get(/databases/$(database)/documents/users/$(request.auth.uid)/incomingSummons/$(requesterUid)).data) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)/incomingSummons/$(requesterUid)).data.createdAt
+          + duration.value(12, 'h') >= request.time;
+    }
+
+    // 편지 본문. 보통 편지는 1~2000자, 호출 응답(펫만 보내기)은 빈 본문.
+    function validLetterBody(d) {
+      return ((!('kind' in d) || d.kind == 'letter') &&
+          d.body is string && d.body.size() > 0 && d.body.size() <= 2000) ||
+        ('kind' in d && d.kind == 'summon_response' && d.body == '' && pendingSummonFrom(d.toUid));
+    }
+
+    // 답장 대기시간. 새 화면은 분 단위(5분~24시간 중 하나), 예전 화면은 시간
+    // 단위(waitHours 1~72)라 둘 중 정확히 하나만 받는다.
+    function validWaitChoice(d) {
+      return ('waitMinutes' in d && !('waitHours' in d) &&
+          d.waitMinutes in [5, 15, 30, 60, 180, 360, 720, 1440]) ||
+        ('waitHours' in d && !('waitMinutes' in d) &&
+          d.waitHours is int && d.waitHours >= 1 && d.waitHours <= 72);
+    }
+
+    // 펫이 아직 상대 곁에서 기다리는 중이라 답장을 실을 수 있는지. 복귀
+    // 시각(autoReturnAt)은 서버가 편지 도착 직후 채운다 — 서두르는 성격이면
+    // 대기시간보다 이르고, 여유로운 성격이 계속 머무는 중이면 null(언제든
+    // 답장 가능). 이 필드가 없는 예전 편지는 replyDeadline으로 판단한다.
+    function letterAcceptsReply(l) {
+      return l.status == 'awaiting_reply' && (
+        ('autoReturnAt' in l)
+          ? (l.autoReturnAt == null || request.time <= l.autoReturnAt)
+          : (l.replyDeadline != null && request.time <= l.replyDeadline)
+      );
     }
 
     // DAY 데이터(data)에 대한 열람 가능 여부. days/{dayId}의 resource.data와
@@ -108,28 +154,28 @@ service cloud.firestore {
         request.resource.data.keys().hasOnly(['uid', 'nickname', 'photoURL', 'bio', 'dayCount', 'createdAt']) &&
         request.resource.data.nickname is string &&
         request.resource.data.nickname.size() > 0 && request.resource.data.nickname.size() <= 30 &&
-        (request.resource.data.photoURL == null || request.resource.data.photoURL is string) &&
+        validPhotoURL(request.resource.data.photoURL) &&
         request.resource.data.bio is string && request.resource.data.bio.size() <= 200 &&
         request.resource.data.dayCount == 0 &&
         request.resource.data.createdAt is timestamp;
       allow update: if isOwner(uid) && (
-        // 프로필 정보는 자유롭게 수정. pushTokens(이 기기의 Expo 푸시 토큰)와
-        // notificationSettings(알림 종류별 on/off)도 본인 계정 안의
-        // 설정값이라 같이 열어준다. nickname/bio 길이나 photoURL 타입을
-        // 검증 안 하면, 화면을 다 깨는 초거대 문자열을 넣거나(다른 사람이
-        // 그 프로필을 볼 때마다 렌더링 비용이 커짐), photoURL을 아무
-        // 외부 주소로나 지정해서 그 프로필을 보는 다른 사람들 기기가
-        // 조용히 그 주소로 요청을 보내게(추적 픽셀처럼 악용) 만들 수
-        // 있었다.
+        // 프로필 정보는 자유롭게 수정. notificationSettings(알림 종류별
+        // on/off)와 locale도 본인 계정 안의 설정값이라 같이 열어준다.
+        // nickname/bio 길이나 photoURL 형식을 검증 안 하면, 화면을 다 깨는
+        // 초거대 문자열을 넣거나 이상한 주소를 넣을 수 있었다.
+        //
+        // pushTokens는 이제 users/{uid}/private/push(본인만 읽기)에 둔다 —
+        // 이 문서는 로그인한 누구나 읽을 수 있어서, 여기 토큰이 있으면 남이
+        // 가져가 Expo 푸시 API로 가짜 알림을 보낼 수 있었다. 예전 필드를
+        // "지우는" 것만 허용한다(새 토큰을 여기 다시 쓰는 건 막는다).
+        //
+        // dayCount(작성한 DAY 수)는 서버(functions/index.js의 onDayWritten)만
+        // 실제 개수를 세서 쓴다 — 예전엔 클라이언트가 ±1 했고 규칙은 "±1인지"만
+        // 봐서, +1 요청만 반복해 숫자를 부풀릴 수 있었다(두 번째 펫 미션 조건).
         (request.resource.data.diff(resource.data).affectedKeys()
           .hasOnly(['nickname', 'bio', 'photoURL', 'pushTokens', 'notificationSettings', 'locale']) &&
+          !('pushTokens' in request.resource.data) &&
           validProfileFieldsIfChanged(resource.data, request.resource.data)) ||
-        // dayCount는 통계값이라 클라이언트가 임의 값으로 덮어쓸 수 없게, 실제
-        // 증감 로직(작성/삭제 시 ±1)과 같은 형태의 변화만 허용한다.
-        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['dayCount']) &&
-          request.resource.data.dayCount >= 0 &&
-          (request.resource.data.dayCount == resource.data.dayCount + 1 ||
-           request.resource.data.dayCount == resource.data.dayCount - 1)) ||
         // 이용약관·개인정보처리방침 동의 기록(ConsentGate): 아직 동의 안 한
         // 계정(consentedAt 필드가 아예 없음)에서만 채울 수 있고, 한 번
         // 채워지면 다시는 못 바꾼다 — 법적 동의 기록이라 사후에 임의로
@@ -141,20 +187,30 @@ service cloud.firestore {
         (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['consentedAt']) &&
           !('consentedAt' in resource.data) &&
           request.resource.data.consentedAt is timestamp) ||
-        // 펫 보유 수(petCount)도 dayCount와 같은 이유로 클라이언트가 임의
-        // 값을 못 넣게 막는다 — 최대 2마리(가입 시 기본 1 + 미션 보상 1,
-        // constants/pets.ts의 MAX_PETS)까지만 늘어날 수 있고, 한 번에 1씩만
-        // 증가한다. 이 필드가 아직 없는 계정(이 기능 이전 가입자)은 첫
-        // 지급에서 1로 시작한다.
+        // 펫 보유 수(petCount)는 클라이언트가 임의 값을 못 넣게 막는다 —
+        // 최대 2마리(첫 펫 1 + 미션 보상 1, constants/pets.ts의 MAX_PETS)까지,
+        // 한 번에 1씩만 늘어난다. 두 번째 펫은 DAY 7개 미션을 채웠을 때만
+        // (dayCount는 서버만 세는 값이라 믿을 수 있다). 실제 펫 문서 생성과
+        // 짝이 맞는지는 pets 규칙 쪽(getAfter)에서 확인한다.
         (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['petCount']) &&
           request.resource.data.petCount <= 2 &&
           ((!('petCount' in resource.data) && request.resource.data.petCount == 1) ||
-           ('petCount' in resource.data && request.resource.data.petCount == resource.data.petCount + 1)))
+           ('petCount' in resource.data && request.resource.data.petCount == resource.data.petCount + 1)) &&
+          (request.resource.data.petCount < 2 || resource.data.dayCount >= 7))
       );
       allow delete: if false;
 
       match /groups/{groupId} {
         allow read, write: if isOwner(uid);
+      }
+
+      // 본인만 볼 수 있는 값(지금은 이 기기들의 Expo 푸시 토큰). 서버
+      // (sendPushOnNotification)는 Admin SDK라 이 규칙과 무관하게 읽는다.
+      match /private/{docId} {
+        allow read, delete: if isOwner(uid);
+        allow create, update: if isOwner(uid) && docId == 'push' &&
+          request.resource.data.keys().hasOnly(['tokens']) &&
+          request.resource.data.tokens is list && request.resource.data.tokens.size() <= 10;
       }
 
       // 남이 쓴 DAY에 내가 태그됐을 때, "내 연혁에도 추가하기"를 선택하면
@@ -237,9 +293,19 @@ service cloud.firestore {
       // 안전하다.
       match /pets/{petId} {
         allow read: if isOwner(uid);
+        // 펫 문서는 반드시 petCount +1과 같은 배치로만 만들 수 있다(getAfter로
+        // 확인). 예전엔 이 짝을 확인하지 않아서 petCount는 그대로 둔 채 펫
+        // 문서만 계속 만들 수 있었다 — 펫이 무한정 늘면 "펫이 나가 있으면 못
+        // 보냄"이라는 도배 방지 장치가 무의미해진다. 종은 기획서의 14종
+        // (예전 4종은 이미 있는 펫 호환용으로만 남김), 성격은 6종.
         allow create: if isOwner(uid) &&
-          request.resource.data.species in ['sparrow', 'owl', 'squirrel', 'turtle'] &&
-          request.resource.data.personality in ['playful', 'timid', 'easygoing', 'careful'] &&
+          getAfter(/databases/$(database)/documents/users/$(uid)).data.petCount ==
+            get(/databases/$(database)/documents/users/$(uid)).data.get('petCount', 0) + 1 &&
+          request.resource.data.species in [
+            'dog', 'cat', 'bird', 'horse', 'cow', 'pig', 'rat', 'tiger', 'rabbit', 'dragon', 'snake',
+            'sheep', 'monkey', 'chicken', 'sparrow', 'owl', 'squirrel', 'turtle'
+          ] &&
+          request.resource.data.personality in ['hasty', 'easygoing', 'careful', 'playful', 'timid', 'reliable'] &&
           request.resource.data.sex in ['male', 'female'] &&
           request.resource.data.name is string && request.resource.data.name.size() > 0 &&
           request.resource.data.name.size() <= 20 &&
@@ -298,7 +364,9 @@ service cloud.firestore {
           request.resource.data.friendUid == friendUid &&
           request.resource.data.keys().hasOnly(['friendUid', 'nickname', 'photoURL', 'groupId', 'groupName', 'createdAt']) &&
           senderNicknameMatches(request.resource.data.nickname) &&
-          (request.resource.data.photoURL == null || request.resource.data.photoURL is string) &&
+          validPhotoURL(request.resource.data.photoURL) &&
+          request.resource.data.groupId is string && request.resource.data.groupName is string &&
+          request.resource.data.groupName.size() <= 30 &&
           exists(/databases/$(database)/documents/users/$(request.auth.uid)/friendRequests/$(uid));
         // 친구 관계를 끊을 땐(그냥 친구 삭제든, 차단이든) 양쪽 문서가 같이
         // 지워져야 한다. 내 쪽만 지우면 상대방 쪽엔 내가 여전히 "친구"로
@@ -325,7 +393,9 @@ service cloud.firestore {
           request.resource.data.fromUid == fromUid &&
           request.resource.data.keys().hasOnly(['fromUid', 'fromNickname', 'fromPhotoURL', 'groupId', 'groupName', 'createdAt']) &&
           senderNicknameMatches(request.resource.data.fromNickname) &&
-          (request.resource.data.fromPhotoURL == null || request.resource.data.fromPhotoURL is string) &&
+          validPhotoURL(request.resource.data.fromPhotoURL) &&
+          request.resource.data.groupId is string && request.resource.data.groupName is string &&
+          request.resource.data.groupName.size() <= 30 &&
           !isBlockedBy(uid, fromUid);
         allow update: if false;
       }
@@ -356,6 +426,15 @@ service cloud.firestore {
             // 관계일 때만 통과한다.
             (request.resource.data.type in ['tag', 'comment', 'like'] &&
               request.resource.data.keys().hasOnly(['type', 'fromUid', 'fromNickname', 'dayId', 'dayTitle', 'read', 'createdAt']) &&
+              // 좋아요/태그 알림은 (DAY, 보낸 사람)마다 문서 ID를 하나로 고정해서
+              // 한 번만 만들 수 있다 — 좋아요를 눌렀다 취소했다 반복하거나 같은
+              // 사람을 계속 태그해서 알림(과 실제 푸시)을 무한정 보내는 걸 막는다.
+              (request.resource.data.type == 'comment' ||
+                notificationId == request.resource.data.type + '_' + request.resource.data.dayId + '_' + request.auth.uid) &&
+              // 태그는 실제로 친구인 사람만 — 모르는 사람 uid를 태그해서 알림을
+              // 뿌리는 걸 막는다.
+              (request.resource.data.type != 'tag' ||
+                exists(/databases/$(database)/documents/users/$(uid)/friends/$(request.auth.uid))) &&
               canReadDayData(get(/databases/$(database)/documents/days/$(request.resource.data.dayId)).data) &&
               request.resource.data.dayTitle ==
                 get(/databases/$(database)/documents/days/$(request.resource.data.dayId)).data.title &&
@@ -415,6 +494,8 @@ service cloud.firestore {
       allow create: if isVerified() &&
         request.resource.data.reporterUid == request.auth.uid &&
         request.resource.data.targetType in ['day', 'comment', 'user'] &&
+        request.resource.data.targetId is string && request.resource.data.targetId.size() <= 128 &&
+        request.resource.data.targetAuthorUid is string && request.resource.data.targetAuthorUid.size() <= 128 &&
         request.resource.data.reason in ['spam', 'abuse', 'inappropriate', 'other'] &&
         request.resource.data.detail is string && request.resource.data.detail.size() <= 500 &&
         request.resource.data.keys().hasOnly(
@@ -433,12 +514,12 @@ service cloud.firestore {
       // 이 조건과 같은 필드를 보므로 list 쿼리도 문제없이 통과한다.
       allow read: if isSignedIn() &&
         (resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid);
-      // 서버(functions/index.js의 onLetterCreated/expireOverdueLetters)만
-      // outboundDamage/replyDeadline/status/repliedAt/expiredAt을 채우거나
-      // 바꿀 수 있다 — Admin SDK 쓰기는 규칙 검사를 우회하므로 별도
-      // allow update 없이 여기서는 그냥 막아둔다. 답장은 이 문서를
-      // update하는 게 아니라 아래 reply/{replyId} 서브컬렉션에 별도로
-      // 쓴다(letters/{letterId}/reply/main 참고).
+      // 서버(functions/letters-core.js)만 손상 추첨 결과, 복귀 시각,
+      // status, 답장 사본 같은 값을 채우거나 바꿀 수 있다 — Admin SDK 쓰기는
+      // 규칙 검사를 우회하므로 별도 allow update 없이 여기서는 그냥 막아둔다.
+      // 답장은 이 문서를 update하는 게 아니라 아래 reply/{replyId}
+      // 서브컬렉션에 별도로 쓴다. 회수/쓰다듬기/재문의도 서버 함수
+      // (petAction)로만 한다.
       allow update, delete: if false;
       allow create: if isVerified() &&
         request.resource.data.fromUid == request.auth.uid &&
@@ -446,6 +527,11 @@ service cloud.firestore {
         senderNicknameMatches(request.resource.data.fromNickname) &&
         friendOfAuthor(request.resource.data.toUid) &&
         !isBlockedBy(request.resource.data.toUid, request.auth.uid) &&
+        // 받는 사람 이름/사진도 실제 프로필과 같아야 한다.
+        request.resource.data.toNickname ==
+          get(/databases/$(database)/documents/users/$(request.resource.data.toUid)).data.nickname &&
+        request.resource.data.toPhotoURL ==
+          get(/databases/$(database)/documents/users/$(request.resource.data.toUid)).data.photoURL &&
         // 보낸 사람이 실제로 소유한, 지금 idle 상태인 펫으로만 보낼 수
         // 있다 — away 상태 펫으로 또 보낼 수 있으면 도배 방지 장치가
         // 무력화된다.
@@ -454,10 +540,7 @@ service cloud.firestore {
           get(/databases/$(database)/documents/users/$(request.auth.uid)/pets/$(request.resource.data.fromPetId)).data.species &&
         request.resource.data.fromPetName ==
           get(/databases/$(database)/documents/users/$(request.auth.uid)/pets/$(request.resource.data.fromPetId)).data.name &&
-        request.resource.data.body is string &&
-        request.resource.data.body.size() > 0 && request.resource.data.body.size() <= 2000 &&
-        request.resource.data.toNickname is string && request.resource.data.toNickname.size() <= 30 &&
-        (request.resource.data.toPhotoURL == null || request.resource.data.toPhotoURL is string) &&
+        validLetterBody(request.resource.data) &&
         // fromPhotoURL은 타입만 확인하면 끝이 아니라 실제 프로필 사진과
         // 정확히 같아야 한다 — 안 그러면 발신자가 아무 외부 주소나(추적
         // 픽셀 등) 적어 넣어도 받는 사람 화면에 그대로 이미지로 렌더링되는
@@ -465,17 +548,16 @@ service cloud.firestore {
         // 특정 상대 한 명만 노려서 악용할 수 있어 더 위험하다).
         request.resource.data.fromPhotoURL ==
           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.photoURL &&
-        request.resource.data.waitHours is int &&
-        request.resource.data.waitHours >= 1 && request.resource.data.waitHours <= 72 &&
+        validWaitChoice(request.resource.data) &&
         request.resource.data.status == 'awaiting_reply' &&
         request.resource.data.replyDeadline == null &&
         request.resource.data.outboundDamage == null &&
         request.resource.data.repliedAt == null &&
         request.resource.data.expiredAt == null &&
         request.resource.data.keys().hasOnly([
-          'fromUid', 'fromNickname', 'fromPhotoURL', 'fromPetId', 'fromPetSpecies', 'fromPetName',
-          'toUid', 'toNickname', 'toPhotoURL', 'body', 'waitHours', 'replyDeadline', 'outboundDamage',
-          'status', 'createdAt', 'repliedAt', 'expiredAt'
+          'kind', 'fromUid', 'fromNickname', 'fromPhotoURL', 'fromPetId', 'fromPetSpecies', 'fromPetName',
+          'toUid', 'toNickname', 'toPhotoURL', 'body', 'waitMinutes', 'waitHours', 'replyDeadline',
+          'outboundDamage', 'status', 'createdAt', 'repliedAt', 'expiredAt'
         ]) &&
         request.resource.data.createdAt is timestamp;
 
@@ -488,10 +570,9 @@ service cloud.firestore {
           (get(/databases/$(database)/documents/letters/$(letterId)).data.fromUid == request.auth.uid ||
            get(/databases/$(database)/documents/letters/$(letterId)).data.toUid == request.auth.uid);
         allow update, delete: if false;
-        allow create: if isSignedIn() && replyId == 'main' &&
+        allow create: if isVerified() && replyId == 'main' &&
           request.auth.uid == get(/databases/$(database)/documents/letters/$(letterId)).data.toUid &&
-          get(/databases/$(database)/documents/letters/$(letterId)).data.status == 'awaiting_reply' &&
-          request.time <= get(/databases/$(database)/documents/letters/$(letterId)).data.replyDeadline &&
+          letterAcceptsReply(get(/databases/$(database)/documents/letters/$(letterId)).data) &&
           request.resource.data.body is string &&
           request.resource.data.body.size() > 0 && request.resource.data.body.size() <= 2000 &&
           request.resource.data.damage == null &&
@@ -639,21 +720,11 @@ service cloud.firestore {
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']) &&
           request.resource.data.status == 'confirmed' &&
           request.time >= resource.data.date &&
-          request.time <= resource.data.date + duration.value(34, 'h')) ||
-        // 좋아요/댓글 수 카운터: 이 DAY를 읽을 수 있는 사람이면 누구나 갱신할 수
-        // 있어야 하지만, 임의 값이 아니라 실제 like/comment 문서 생성·삭제와
-        // 짝이 맞는 ±1 증감만 허용한다(그 전에는 누구든 원하는 숫자로 덮어쓸 수
-        // 있는 IDOR/변조 취약점이 있었다).
-        (canReadDayData(resource.data) &&
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likeCount']) &&
-          request.resource.data.likeCount >= 0 &&
-          (request.resource.data.likeCount == resource.data.likeCount + 1 ||
-           request.resource.data.likeCount == resource.data.likeCount - 1)) ||
-        (canReadDayData(resource.data) &&
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['commentCount']) &&
-          request.resource.data.commentCount >= 0 &&
-          (request.resource.data.commentCount == resource.data.commentCount + 1 ||
-           request.resource.data.commentCount == resource.data.commentCount - 1))
+          request.time <= resource.data.date + duration.value(34, 'h'))
+        // 좋아요/댓글 수(likeCount/commentCount)는 여기 없다 — 서버
+        // (functions/index.js의 onLikeWritten/onCommentWritten)가 실제 문서
+        // 개수를 다시 세서 쓴다. 예전엔 클라이언트가 ±1 했고 규칙은 "±1인지"만
+        // 봐서, 좋아요 문서 없이 +1 요청만 반복해 숫자를 부풀릴 수 있었다.
       );
 
       allow delete: if false; // 소프트 삭제(update)만 허용
@@ -694,8 +765,21 @@ service cloud.firestore {
           canReadDayData(get(/databases/$(database)/documents/days/$(dayId)).data) &&
           !isBlockedBy(get(/databases/$(database)/documents/days/$(dayId)).data.authorId, request.auth.uid);
         allow update: if false;
-        allow delete: if isSignedIn() && resource.data.authorId == request.auth.uid;
+        // 댓글 작성자 본인, 또는 그 DAY의 작성자(내 글에 달린 댓글 정리)가
+        // 지울 수 있다. 댓글 수와 "내가 쓴 댓글" 사본은 서버가 정리한다.
+        allow delete: if isSignedIn() && (
+          resource.data.authorId == request.auth.uid ||
+          get(/databases/$(database)/documents/days/$(dayId)).data.authorId == request.auth.uid
+        );
       }
+    }
+
+    // 운영 설정값(예: config/petRules — 펫 손상 확률 등). 서버가 읽어서 쓰고,
+    // 화면은 "손상 확률 N%" 같은 표시용으로만 읽는다. 수정은 Firebase
+    // 콘솔(관리자)에서만.
+    match /config/{docId} {
+      allow read: if isSignedIn();
+      allow write: if false;
     }
   }
 }

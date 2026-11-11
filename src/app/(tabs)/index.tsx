@@ -5,6 +5,7 @@ import { ActivityIndicator, FlatList, Pressable, RefreshControl, ScrollView, Sty
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { DAY_CARD_ROW_GAP, DayCard } from '@/components/day-card';
+import { DayListRow } from '@/components/day-list-row';
 import { EmptyState } from '@/components/empty-state';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -14,7 +15,7 @@ import { useAuth } from '@/context/auth-context';
 import { listBlockedUidSet } from '@/data/blocks';
 import { useLocale } from '@/hooks/use-locale';
 import { useTheme } from '@/hooks/use-theme';
-import { listFriendsFeed, listWorldDaysNew, listWorldDaysToday } from '@/data/days';
+import { listFriendsFeed, listMyDaysOn, listWorldDaysNew, listWorldDaysToday } from '@/data/days';
 import { listFriends } from '@/data/friends';
 import { countUnreadNotifications } from '@/data/notifications';
 import type { DayDoc } from '@/types/day';
@@ -41,6 +42,9 @@ export default function WorldDayScreen() {
   const [popularToday, setPopularToday] = useState<DayDoc[]>([]);
   const [newest, setNewest] = useState<DayDoc[]>([]);
   const [friendFeed, setFriendFeed] = useState<DayDoc[]>([]);
+  // 오늘 날짜로 내가 남긴 DAY — 있으면 상단 "오늘은 어떤 DAY인가요?" 자리에
+  // 그 DAY의 이름이 들어간다(여러 개면 가장 최근 것).
+  const [myTodayDays, setMyTodayDays] = useState<DayDoc[]>([]);
   const [friendUids, setFriendUids] = useState<string[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -49,12 +53,14 @@ export default function WorldDayScreen() {
 
   const load = useCallback(async (friends: string[]) => {
     if (!user) return;
-    const [popular, recent, feed, blocked] = await Promise.all([
+    const [popular, recent, feed, blocked, mine] = await Promise.all([
       listWorldDaysToday(PREVIEW_SIZE),
       listWorldDaysNew(PREVIEW_SIZE),
       listFriendsFeed(friends, PREVIEW_SIZE),
       listBlockedUidSet(user.uid),
+      listMyDaysOn(user.uid, todayKstLabel()),
     ]);
+    setMyTodayDays(mine);
     // 차단한 사람의 글은 피드에서 걸러낸다(클라이언트 필터 — 서버 쿼리
     // 자체에서 "이 uid들 제외"를 못 하니 결과를 받은 뒤 뺀다).
     setPopularToday(popular.filter((d) => !blocked.has(d.authorId)));
@@ -121,6 +127,8 @@ export default function WorldDayScreen() {
     setRefreshing(false);
   }
 
+  const myToday = myTodayDays[0] ?? null;
+
   function seeAllFriendFeed() {
     router.push({ pathname: '/day-list', params: { type: 'friends', title: t('main.friendFeed'), friendUids: JSON.stringify(friendUids) } });
   }
@@ -174,14 +182,37 @@ export default function WorldDayScreen() {
             </ThemedView>
           )}
 
-          <ThemedView surface="surface" style={[styles.hero, { shadowColor: theme.ink }]}>
+          <Pressable
+            disabled={!myToday}
+            onPress={() => myToday && router.push(`/day/${myToday.id}`)}
+            accessibilityRole={myToday ? 'button' : undefined}
+            style={[styles.hero, { backgroundColor: theme.surface, shadowColor: theme.ink }]}>
             <ThemedText type="label" color="accentInk">
               {formatDayLabelKorean(todayKstLabel())}
             </ThemedText>
-            <ThemedText type="heading">{t('main.today')}</ThemedText>
-            <ThemedText type="caption" color="sub">
-              {t('main.todayHint')}
-            </ThemedText>
+            {myToday ? (
+              <>
+                <ThemedText type="caption" color="sub">
+                  {t('main.myTodayLabel')}
+                </ThemedText>
+                <ThemedText type="heading" numberOfLines={2}>
+                  {myToday.title}
+                </ThemedText>
+                <View style={styles.heroLinkRow}>
+                  <ThemedText type="caption" color="accentInk">
+                    {myTodayDays.length > 1 ? t('main.myTodayMore', { count: myTodayDays.length }) : t('main.myTodayOpen')}
+                  </ThemedText>
+                  <Ionicons name="chevron-forward" size={13} color={theme.accentInk} />
+                </View>
+              </>
+            ) : (
+              <>
+                <ThemedText type="heading">{t('main.today')}</ThemedText>
+                <ThemedText type="caption" color="sub">
+                  {t('main.todayHint')}
+                </ThemedText>
+              </>
+            )}
             {todaysOfficialDays.length > 0 && (
               <View style={styles.officialDayRow}>
                 {todaysOfficialDays.map((d) => (
@@ -193,7 +224,7 @@ export default function WorldDayScreen() {
                 ))}
               </View>
             )}
-          </ThemedView>
+          </Pressable>
 
           {friendUids.length > 0 && (
             <Section
@@ -250,20 +281,16 @@ export default function WorldDayScreen() {
             emptyTitle={t('main.emptyTitle')}
             emptyDescription={t('main.emptyDescription')}
             onSeeAll={newest.length > 0 ? seeAllNewest : undefined}>
-            <FlatList
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              data={newest}
-              keyExtractor={(item) => item.id}
-              contentContainerStyle={styles.row}
-              renderItem={({ item }) => (
-                <DayCard
+            <View style={[styles.board, { backgroundColor: theme.surface, borderColor: theme.line }]}>
+              {newest.map((item, index) => (
+                <DayListRow
+                  key={item.id}
                   day={item}
-                  meta={`${item.authorNickname} · ${relativeTimeFromNow(item.createdAt)}`}
+                  isLast={index === newest.length - 1}
                   onPress={() => router.push(`/day/${item.id}`)}
                 />
-              )}
-            />
+              ))}
+            </View>
           </Section>
         </ScrollView>
       </SafeAreaView>
@@ -317,7 +344,8 @@ function Section({
 const styles = StyleSheet.create({
   flex: { flex: 1 },
   scrollContent: {
-    paddingBottom: Spacing.six,
+    // 오른쪽 아래 글쓰기 버튼(FAB)에 마지막 줄이 가리지 않게 넉넉히 둔다.
+    paddingBottom: Spacing.six + Spacing.five,
   },
   topBar: {
     flexDirection: 'row',
@@ -378,6 +406,17 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.06,
     shadowRadius: 3,
     elevation: 1,
+  },
+  heroLinkRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+  },
+  board: {
+    marginHorizontal: Spacing.four,
+    borderRadius: Radius.large,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
   },
   officialDayRow: {
     flexDirection: 'row',

@@ -9,8 +9,13 @@ dist/
 web-build/
 expo-env.d.ts
 
-# Firebase CLI
+# Firebase CLI / 에뮬레이터 로그
 .firebase/
+firebase-debug.log*
+firestore-debug.log*
+database-debug.log*
+pubsub-debug.log*
+ui-debug.log*
 
 # Native
 .kotlin/
