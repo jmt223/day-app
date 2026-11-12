@@ -15,6 +15,7 @@ import { useTheme } from '@/hooks/use-theme';
 import type { MyCommentEntry } from '@/types/day';
 import { confirmAsync, notify } from '@/utils/confirm';
 import { relativeTimeFromNow } from '@/utils/date';
+import { friendlyErrorMessage } from '@/utils/error-message';
 
 const PAGE_SIZE = 20;
 
@@ -46,13 +47,12 @@ export default function MyCommentsScreen() {
         })
         .catch((error) => {
           console.error('내 댓글을 불러오지 못했어요', error);
-          if (active) setLoadError(error?.message ?? t('common.unknownError'));
+          if (active) setLoadError(friendlyErrorMessage(error));
         })
         .finally(() => active && setLoading(false));
       return () => {
         active = false;
       };
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [user])
   );
 

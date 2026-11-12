@@ -13,6 +13,7 @@ import { useLocale } from '@/hooks/use-locale';
 import { useTheme } from '@/hooks/use-theme';
 import type { BlockedUser } from '@/types/user';
 import { notify } from '@/utils/confirm';
+import { friendlyErrorMessage } from '@/utils/error-message';
 
 export default function BlockedUsersScreen() {
   const theme = useTheme();
@@ -32,13 +33,12 @@ export default function BlockedUsersScreen() {
         .then((list) => active && setItems(list))
         .catch((error) => {
           console.error('차단 목록을 불러오지 못했어요', error);
-          if (active) setLoadError(error?.message ?? t('common.unknownError'));
+          if (active) setLoadError(friendlyErrorMessage(error));
         })
         .finally(() => active && setLoading(false));
       return () => {
         active = false;
       };
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [user])
   );
 

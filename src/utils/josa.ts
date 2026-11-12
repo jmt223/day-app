@@ -11,6 +11,12 @@ function withJosa(word: string, pair: '이/가' | '을/를' | '은/는' | '와/�
   return `${word}${hasBatchim ? withBatchim : withoutBatchim}`;
 }
 
+/** 따옴표로 감싼 말 뒤에 붙일 조사만 돌려준다 — "'생일 파티'를", "'첫 출근 날'을".
+ * 번역 문구의 {{josa}} 자리에 넣는다(영어 문구에는 그 자리가 없어서 무시된다). */
+export function josaOnly(word: string, pair: '이/가' | '을/를' | '은/는' | '와/과'): string {
+  return getLocale() === 'ko' ? withJosa(word, pair).slice(word.length) : '';
+}
+
 /** 번역 문구의 {{pet}} 자리에 넣을 값. 한국어 문구는 조사까지 붙여서
  * ("두부가", "초롱이"), 영어 문구는 이름만 넣는다. */
 export function petName(name: string, pair: '이/가' | '을/를' | '은/는' | '와/과' = '이/가'): string {

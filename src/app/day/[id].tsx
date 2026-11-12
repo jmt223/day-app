@@ -58,7 +58,7 @@ import { useTheme } from '@/hooks/use-theme';
 import type { CommentDoc, ContentBlock, DayDoc, DayVisibility, MoodKey, TextAlignKey } from '@/types/day';
 import type { FriendEntry, FriendGroup, ReportReason } from '@/types/user';
 import { confirmAsync, notify } from '@/utils/confirm';
-import { formatDayLabelKorean, formatWrittenAtKorean, isFutureLabel, isWritableNow } from '@/utils/date';
+import { formatDayLabelKorean, formatWrittenAtKorean, isFutureLabel, isWritableNow, relativeTimeFromNow } from '@/utils/date';
 
 const EDIT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -142,16 +142,20 @@ export default function DayDetailScreen() {
 
   const load = useCallback(async () => {
     if (!id || !user) return;
-    const [dayDoc, commentList, likedByMe, linked] = await Promise.all([
-      getDay(id),
-      listComments(id),
-      hasLiked(id, user.uid),
-      isInMyHistory(user.uid, id),
-    ]);
+    // 댓글·좋아요도 DAY와 동시에 요청해 둔다. 다만 DAY를 볼 수 없으면(삭제됐거나
+    // 공개범위가 바뀜 — getDay가 null) 이 둘도 규칙에서 거부되는데, 그건 오류가 아니라
+    // "없는 DAY" 화면을 보여주면 되는 상황이라 그 실패는 버린다.
+    const commentsRequest = listComments(id);
+    const likedRequest = hasLiked(id, user.uid);
+    commentsRequest.catch(() => undefined);
+    likedRequest.catch(() => undefined);
+    const [dayDoc, linked] = await Promise.all([getDay(id), isInMyHistory(user.uid, id)]);
     setDay(dayDoc);
+    setInMyHistory(linked);
+    if (!dayDoc) return;
+    const [commentList, likedByMe] = await Promise.all([commentsRequest, likedRequest]);
     setComments(commentList);
     setLiked(likedByMe);
-    setInMyHistory(linked);
   }, [id, user]);
 
   useFocusEffect(
@@ -504,7 +508,10 @@ export default function DayDetailScreen() {
                   <View style={[styles.visibilityRow, { backgroundColor: theme.card }]}>
                     <Ionicons name="lock-closed-outline" size={13} color={theme.sub} />
                     <ThemedText type="caption" color="sub">
-                      {t('dayDetail.privateUntilConfirmed')}
+                      {/* 기한이 지나 영영 확정할 수 없는 예정 DAY에 "확정 후 변경 가능"은 맞지 않다. */}
+                      {isFutureLabel(day.dateLabel) || isWritableNow(day.dateLabel)
+                        ? t('dayDetail.privateUntilConfirmed')
+                        : visibilityLabel('private')}
                     </ThemedText>
                   </View>
                 )
@@ -605,7 +612,9 @@ export default function DayDetailScreen() {
                 {day.status === 'confirmed' && (
                   <View style={styles.interactionItem}>
                     <Ionicons name="chatbubble-outline" size={18} color={theme.sub} />
-                    <ThemedText type="caption">{day.commentCount}</ThemedText>
+                    {/* 이 화면은 댓글을 전부 불러오니 보이는 개수를 그대로 쓴다 — commentCount는
+                        서버가 나중에 다시 세는 값이라, 방금 달거나 지운 직후엔 목록과 어긋났다. */}
+                    <ThemedText type="caption">{comments.length}</ThemedText>
                   </View>
                 )}
                 {isAuthor ? (
@@ -629,7 +638,12 @@ export default function DayDetailScreen() {
                       onPress={() => router.push({ pathname: '/profile', params: { uid: comment.authorId } })}>
                       <Avatar uri={comment.authorPhotoURL} size={30} />
                       <View style={styles.commentTextBlock}>
-                        <ThemedText type="label">{comment.authorNickname}</ThemedText>
+                        <View style={styles.commentHeader}>
+                          <ThemedText type="label">{comment.authorNickname}</ThemedText>
+                          <ThemedText type="caption" color="muted">
+                            {relativeTimeFromNow(comment.createdAt)}
+                          </ThemedText>
+                        </View>
                         <ThemedText type="caption" color="sub">
                           {comment.body}
                         </ThemedText>
@@ -1058,6 +1072,11 @@ const styles = StyleSheet.create({
   commentTextBlock: {
     flex: 1,
     gap: 3,
+  },
+  commentHeader: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: Spacing.two,
   },
   commentActions: {
     flexDirection: 'row',

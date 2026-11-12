@@ -16,6 +16,11 @@ firestore-debug.log*
 database-debug.log*
 pubsub-debug.log*
 ui-debug.log*
+storage-debug.log*
+.emulator-data/
+
+# 테스트 데이터 생성기가 받아둔 사진(npm run seed)
+.seed-cache/
 
 # Native
 .kotlin/

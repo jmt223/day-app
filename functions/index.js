@@ -252,14 +252,17 @@ const NOTIFICATION_CATEGORY = {
 // Cloud Functions는 클라이언트 번들과 별도로 배포되는 독립 코드라 그
 // 파일을 그대로 가져다 쓸 수 없어서, 푸시 문구만 따로 복사해둔다 — 문구를
 // 바꾸면 양쪽 다 맞춰줘야 한다.
+// 따옴표로 감싼 제목 뒤 조사만('생일 파티'를 / '첫 출근 날'을).
+const objectJosa = (word) => withJosa(String(word || ''), '을/를').slice(String(word || '').length);
+
 const PUSH_MESSAGES = {
   ko: {
     tag: (n) => `${n.fromNickname}님이 '${n.dayTitle}'에 회원님을 태그했어요`,
     comment: (n) => `${n.fromNickname}님이 '${n.dayTitle}'에 댓글을 남겼어요`,
-    like: (n) => `${n.fromNickname}님이 '${n.dayTitle}'을 좋아해요`,
+    like: (n) => `${n.fromNickname}님이 '${n.dayTitle}'${objectJosa(n.dayTitle)} 좋아해요`,
     friend_request: (n) => `${n.fromNickname}님이 친구 요청을 보냈어요`,
     friend_accept: (n) => `${n.fromNickname}님이 친구 요청을 수락했어요`,
-    memory: (n) => `${n.yearsAgo}년 전 오늘, '${n.dayTitle}'을 기록했어요`,
+    memory: (n) => `${n.yearsAgo}년 전 오늘, '${n.dayTitle}'${objectJosa(n.dayTitle)} 기록했어요`,
     letter_received: (n) =>
       n.petName
         ? `${n.fromNickname}님의 ${withJosa(n.petName, '이/가')} 편지를 물고 왔어요`

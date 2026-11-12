@@ -18,6 +18,7 @@ import {
 import { useLocale } from '@/hooks/use-locale';
 import { useTheme } from '@/hooks/use-theme';
 import type { DayDoc } from '@/types/day';
+import { friendlyErrorMessage } from '@/utils/error-message';
 
 const PAGE_SIZE = 20;
 
@@ -81,13 +82,12 @@ export default function DayListScreen() {
       })
       .catch((error) => {
         console.error('목록을 불러오지 못했어요', error);
-        if (active) setLoadError(error?.message ?? t('common.unknownError'));
+        if (active) setLoadError(friendlyErrorMessage(error));
       })
       .finally(() => active && setLoading(false));
     return () => {
       active = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchPage]);
 
   async function loadMore() {

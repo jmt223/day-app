@@ -236,6 +236,19 @@ export default function ProfileScreen() {
               </View>
               <Ionicons name="chevron-forward" size={16} color={theme.muted} />
             </Pressable>
+            {/* 친구 프로필에서 바로 그 친구와의 편지 대화창으로 — 예전엔 "펫 보내달라고
+                하기"만 있고 정작 편지를 쓰려면 편지함으로 돌아가 친구를 다시 골라야 했다. */}
+            {isFriendOfMine && (
+              <Pressable
+                onPress={() => router.push({ pathname: '/letters/with/[uid]', params: { uid: paramUid } })}
+                style={[styles.menuRow, { borderColor: theme.line }]}>
+                <View style={styles.menuLeft}>
+                  <Ionicons name="mail-outline" size={18} color={theme.sub} />
+                  <ThemedText type="body">{t('profile.writeLetter')}</ThemedText>
+                </View>
+                <Ionicons name="chevron-forward" size={16} color={theme.muted} />
+              </Pressable>
+            )}
             {isFriendOfMine && (
               <Pressable onPress={handleSummon} disabled={summoning} style={[styles.menuRow, { borderColor: theme.line }]}>
                 <View style={styles.menuLeft}>

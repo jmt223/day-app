@@ -1,26 +1,18 @@
 import { Ionicons } from '@expo/vector-icons';
-import { Image } from 'expo-image';
 import { Pressable, StyleSheet, View } from 'react-native';
 
+import { DayThumb } from '@/components/day-thumb';
 import { ThemedText } from '@/components/themed-text';
 import { Radius, Spacing } from '@/constants/theme';
-import { useProtectedPhoto } from '@/hooks/use-protected-photo';
 import { useTheme } from '@/hooks/use-theme';
 import type { DayDoc } from '@/types/day';
 
 export function DayCard({ day, meta, onPress }: { day: DayDoc; meta: string; onPress: () => void }) {
   const theme = useTheme();
-  const cover = useProtectedPhoto(day.photoURLs[0]);
 
   return (
     <Pressable onPress={onPress} style={styles.card}>
-      <View style={[styles.thumb, { backgroundColor: theme.card }]}>
-        {cover ? (
-          <Image source={cover} style={styles.thumbImage} contentFit="cover" />
-        ) : (
-          <Ionicons name="image-outline" size={24} color={theme.muted} />
-        )}
-      </View>
+      <DayThumb day={day} variant="tall" style={styles.thumb} />
       <ThemedText type="label" numberOfLines={1}>
         {day.title}
       </ThemedText>
@@ -57,13 +49,6 @@ const styles = StyleSheet.create({
     width: CARD_WIDTH,
     height: 150,
     borderRadius: Radius.large,
-    alignItems: 'center',
-    justifyContent: 'center',
-    overflow: 'hidden',
-  },
-  thumbImage: {
-    width: '100%',
-    height: '100%',
   },
   statsRow: {
     flexDirection: 'row',

@@ -71,7 +71,11 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "emu": "firebase emulators:start --only auth,firestore,functions,storage --project demo-day-app",
+    "seed": "node scripts/seed/generate.js",
+    "emu:sweep": "node scripts/seed/sweep.js",
+    "web:emu": "node scripts/web-emu.js"
   },
   "private": true
 }

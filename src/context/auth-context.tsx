@@ -151,8 +151,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // ensureUserProfile이 user.photoURL을 읽을 때 방금 올린 사진 URL이
       // 그대로 반영된다(프로필 문서를 두 번 쓸 필요가 없다). 사진은 권장일 뿐
       // 필수가 아니라서 안 골랐으면 건너뛴다(프로필엔 기본 아이콘이 뜬다).
-      const photoURL = photoLocalUri ? await uploadAvatar(credential.user.uid, photoLocalUri) : null;
-      await firebaseUpdateProfile(credential.user, { displayName: nickname.trim(), photoURL });
+      //
+      // 여기부터는 계정이 이미 만들어진 뒤라, 사진 업로드나 Auth 표시 이름 저장이
+      // 실패했다고 회원가입 전체를 실패로 돌리면 안 된다 — 예전엔 "회원가입 실패"
+      // 창이 뜨는데 실제로는 가입이 끝나 있는 모순된 상태가 됐다. 사진은 나중에
+      // 프로필 편집에서 다시 올리면 되니 실패해도 넘어간다.
+      const photoURL = photoLocalUri
+        ? await uploadAvatar(credential.user.uid, photoLocalUri).catch((error) => {
+            console.error('가입 중 프로필 사진을 올리지 못했어요', error);
+            return null;
+          })
+        : null;
+      // 사진이 없을 때 photoURL: null을 같이 보내면 Auth 에뮬레이터가 400으로 거부한다
+      // ("/photoUrl must be string") — 값이 있을 때만 넣는다.
+      await firebaseUpdateProfile(credential.user, photoURL ? { displayName: nickname.trim(), photoURL } : { displayName: nickname.trim() }).catch(
+        (error) => console.error('가입 중 표시 이름을 저장하지 못했어요', error)
+      );
       const p = await ensureUserProfile(credential.user, nickname);
       setProfile(p);
       await sendEmailVerification(credential.user).catch(() => undefined);
@@ -195,7 +209,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const { customToken, nickname, photoURL } = await exchangeKakaoCode(code, redirectUri);
       const credential = await signInWithCustomToken(auth, customToken);
-      await firebaseUpdateProfile(credential.user, { displayName: nickname, photoURL });
+      // 프로필 사진이 없는 카카오 계정이면 photoURL을 빼고 보낸다(null은 Auth
+      // 에뮬레이터가 거부한다 — signUp 참고). 앱이 쓰는 사진은 아래 Firestore 프로필 쪽이다.
+      await firebaseUpdateProfile(credential.user, photoURL ? { displayName: nickname, photoURL } : { displayName: nickname });
       const p = await ensureUserProfile(credential.user, nickname);
       // 카카오 uid는 같은 카카오 계정이면 로그인할 때마다 항상 같다(kakao:
       // <카카오 사용자 ID>로 우리가 직접 고정해서 만든다). 그래서 예전에

@@ -15,7 +15,8 @@ import { useTheme } from '@/hooks/use-theme';
 import type { AppNotification, NotificationType } from '@/types/user';
 import { confirmAsync, notify } from '@/utils/confirm';
 import { relativeTimeFromNow } from '@/utils/date';
-import { petName } from '@/utils/josa';
+import { friendlyErrorMessage } from '@/utils/error-message';
+import { josaOnly, petName } from '@/utils/josa';
 
 const ICONS: Record<NotificationType, keyof typeof import('@expo/vector-icons/Ionicons').default.glyphMap> = {
   tag: 'person-add-outline',
@@ -41,13 +42,21 @@ function messageFor(notification: AppNotification, t: ReturnType<typeof useLocal
     case 'comment':
       return t('notifications.comment', { nickname: notification.fromNickname, dayTitle: notification.dayTitle ?? '' });
     case 'like':
-      return t('notifications.like', { nickname: notification.fromNickname, dayTitle: notification.dayTitle ?? '' });
+      return t('notifications.like', {
+        nickname: notification.fromNickname,
+        dayTitle: notification.dayTitle ?? '',
+        josa: josaOnly(notification.dayTitle ?? '', '을/를'),
+      });
     case 'friend_request':
       return t('notifications.friendRequest', { nickname: notification.fromNickname });
     case 'friend_accept':
       return t('notifications.friendAccept', { nickname: notification.fromNickname });
     case 'memory':
-      return t('notifications.memory', { years: notification.yearsAgo ?? 1, dayTitle: notification.dayTitle ?? '' });
+      return t('notifications.memory', {
+        years: notification.yearsAgo ?? 1,
+        dayTitle: notification.dayTitle ?? '',
+        josa: josaOnly(notification.dayTitle ?? '', '을/를'),
+      });
     case 'letter_received':
       return notification.petName
         ? t('notifications.letterReceivedPet', { nickname: notification.fromNickname, pet: petName(notification.petName) })
@@ -93,13 +102,12 @@ export default function NotificationsScreen() {
         .then((list) => active && setItems(list))
         .catch((error) => {
           console.error('알림을 불러오지 못했어요', error);
-          if (active) setLoadError(error?.message ?? t('common.unknownError'));
+          if (active) setLoadError(friendlyErrorMessage(error));
         })
         .finally(() => active && setLoading(false));
       return () => {
         active = false;
       };
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [user])
   );
 

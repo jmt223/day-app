@@ -20,6 +20,7 @@ import { listFriends } from '@/data/friends';
 import { countUnreadNotifications } from '@/data/notifications';
 import type { DayDoc } from '@/types/day';
 import { formatDayLabelKorean, relativeTimeFromNow, todayKstLabel } from '@/utils/date';
+import { friendlyErrorMessage } from '@/utils/error-message';
 
 // 홈 화면은 "미리보기"만 보여준다 — 세 섹션 다 이 개수만큼만 가로로
 // 보여주고, 그 이상은 "전체보기"로 넘어가서 본다(day-list.tsx). 예전엔
@@ -83,7 +84,7 @@ export default function WorldDayScreen() {
         })
         .catch((error) => {
           console.error('월드 데이를 불러오지 못했어요', error);
-          if (active) setLoadError(error?.message ?? t('common.unknownError'));
+          if (active) setLoadError(friendlyErrorMessage(error));
         })
         .finally(() => {
           if (active) setLoading(false);
@@ -91,11 +92,6 @@ export default function WorldDayScreen() {
       return () => {
         active = false;
       };
-      // t는 언어가 바뀔 때마다 새 함수 참조가 되는데, 여기 의존성에 넣으면
-      // (네이티브에서) 언어를 바꿀 때마다 이 화면에 있던 피드를 불필요하게
-      // 다시 통째로 불러오게 된다 — 에러 메시지 번역 하나 때문에 감수할
-      // 비용이 아니라서 뺀다.
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [load, user])
   );
 
@@ -122,7 +118,7 @@ export default function WorldDayScreen() {
       .then(() => setLoadError(null))
       .catch((error) => {
         console.error('월드 데이를 불러오지 못했어요', error);
-        setLoadError(error?.message ?? t('common.unknownError'));
+        setLoadError(friendlyErrorMessage(error));
       });
     setRefreshing(false);
   }

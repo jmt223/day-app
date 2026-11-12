@@ -1,10 +1,8 @@
-import { Ionicons } from '@expo/vector-icons';
-import { Image } from 'expo-image';
 import { Pressable, StyleSheet, View } from 'react-native';
 
+import { DayThumb } from '@/components/day-thumb';
 import { ThemedText } from '@/components/themed-text';
 import { Radius, Spacing } from '@/constants/theme';
-import { useProtectedPhoto } from '@/hooks/use-protected-photo';
 import { useTheme } from '@/hooks/use-theme';
 import type { DayDoc } from '@/types/day';
 import { previewTextFromBlocks } from '@/utils/content-blocks';
@@ -20,7 +18,6 @@ export function TimelineCard({
   onPress: () => void;
 }) {
   const theme = useTheme();
-  const cover = useProtectedPhoto(day.photoURLs[0]);
 
   return (
     <View style={styles.row}>
@@ -33,13 +30,7 @@ export function TimelineCard({
           {formatDayLabelShort(day.dateLabel)}
         </ThemedText>
         <View style={[styles.card, { backgroundColor: theme.surface, borderColor: theme.line }]}>
-          <View style={[styles.thumb, { backgroundColor: theme.card }]}>
-            {cover ? (
-              <Image source={cover} style={styles.thumbImage} contentFit="cover" />
-            ) : (
-              <Ionicons name="image-outline" size={20} color={theme.muted} />
-            )}
-          </View>
+          <DayThumb day={day} variant="small" style={styles.thumb} />
           <View style={styles.textBlock}>
             <ThemedText type="label" numberOfLines={1}>
               {day.title}
@@ -90,13 +81,6 @@ const styles = StyleSheet.create({
     width: 56,
     height: 56,
     borderRadius: Radius.medium,
-    alignItems: 'center',
-    justifyContent: 'center',
-    overflow: 'hidden',
-  },
-  thumbImage: {
-    width: '100%',
-    height: '100%',
   },
   textBlock: {
     flex: 1,

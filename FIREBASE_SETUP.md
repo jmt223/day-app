@@ -67,13 +67,39 @@ firebase deploy --only hosting
 운영 데이터를 건드리지 않고 규칙·함수를 같이 돌려볼 수 있습니다(Java 21 필요). 프로젝트 ID를 `demo-`로 시작하게 주면 실제 Firebase에 절대 접속하지 않습니다.
 
 ```bash
-firebase emulators:start --only auth,firestore,functions --project demo-day-app
-
-# 다른 터미널에서, 앱을 에뮬레이터에 붙여 실행
-EXPO_PUBLIC_USE_FIREBASE_EMULATOR=1 EXPO_PUBLIC_FIREBASE_PROJECT_ID=demo-day-app npx expo start --web
+npm run emu        # 터미널 1: 에뮬레이터(Auth·Firestore·Functions·Storage)
+npm run seed       # 터미널 2: 테스트 데이터 깔기(에뮬레이터를 비우고 새로 만든다, 1분 이내)
+npm run web:emu    # 터미널 2: 웹 앱을 에뮬레이터에 붙여 실행
+npm run emu:sweep  # (선택) 터미널 3: 펫 자동 복귀를 1분마다 돌림
 ```
 
-에뮬레이터에선 1분마다 도는 스케줄 함수(`expireOverdueLetters`)가 자동 실행되지 않습니다. `functions/letters-core.js`의 `sweepLetters()`를 직접 불러서 확인하세요.
+에뮬레이터는 스케줄 함수(`expireOverdueLetters`)를 실행하지 않아서, 시간이 끝난 펫이 돌아오지 않습니다. `npm run emu:sweep`이 같은 코드(`sweepLetters()`)를 대신 1분마다 돌립니다.
+
+### 테스트 데이터(`npm run seed`)
+
+`scripts/seed/generate.js`가 실제 사용자처럼 1년 넘게 쌓인 데이터를 만듭니다 — 사람 150명, 친구 무리와 그룹, DAY 4천여 개(사진 2천여 장, 예정·삭제·수정·태그·위치 포함), 좋아요 2만·댓글 4천여 개, 펫 190여 마리와 편지 2천4백여 통(답장·시간 종료·조기 복귀·계속 머묾·회수·펫 보내줘·손상·재문의), 알림, 차단·신고. 시각은 전부 **돌리는 순간 기준**이라, 날짜가 바뀌면 에뮬레이터를 껐다 켠 뒤(`npm run emu`) 다시 돌리면 됩니다(같은 시드면 같은 구성). 데이터가 든 에뮬레이터에 그대로 다시 돌리면 지우는 데만 10분 넘게 걸려서, 생성기가 멈추고 다시 켜라고 안내합니다. 사진은 처음 한 번 Unsplash에서 받아 `.seed-cache/`에 둡니다.
+
+비밀번호는 전부 `test1234!`입니다.
+
+| 계정 | 확인할 것 |
+| --- | --- |
+| `me@day.test` (지민) | 데이터가 가장 많은 메인 계정 — 오늘의 DAY, 예정 DAY(오늘 확정 가능·미래·기한 만료), 태그된 DAY, 1년 전 회고 알림, 친구 48명, 펫 2마리, 편지 250여 통 |
+| `minji@day.test` (민지) | 콩이가 지민 곁에서 답장을 기다리는 중(손상된 편지), 지민의 두부도 민지 곁에 와 있음 |
+| `seojun@day.test` (서준) | 똘이가 시간이 지났는데도 지민 곁에 계속 머무는 중 |
+| `hayun@day.test` (하윤) | 지민의 "펫 보내줘"에 응답해서 삐약이를 보낸 상태 |
+| `doyun@day.test` / `yerin@day.test` | 지민에게 "펫 보내줘"를 보내 둔 상태 |
+| `heavy@day.test` (루비맘) | 1년 넘게 거의 매일 쓴 헤비 유저(DAY 300개 이상, 목록 더보기) |
+| `mission@day.test` (미션왕) | DAY 7개를 채워 두 번째 펫을 받을 수 있는 상태 |
+| `new@day.test` (새내기) | 방금 가입 — 빈 화면, 첫 펫 고르기 |
+| `unverified@day.test` | 이메일 인증 화면 |
+| `noconsent@day.test` | 약관 동의 화면 |
+| `legacy@day.test` (옛날사람) | 개편 전 펫(참새)과 예전 형식 편지 |
+| `en@day.test` (Alex) | 영어 설정, 좋아요·회고 푸시 꺼 둠 |
+| `blocker@day.test` (밤하늘) | 지민을 차단한 사람 |
+| `spam@day.test` (이벤트당첨안내) | 광고 댓글을 달다가 지민에게 차단·신고된 계정 |
+| `user001@day.test` ~ | 그 밖의 보통 사용자들 |
+
+편지 상대 14명(민지·서준·하윤·도윤·예린·시우 등)은 펫 종이 전부 달라서, 지민의 대화창들에서 14종의 손상 표현을 모두 볼 수 있습니다. 옵션: `npm run seed -- --users=300`(사람 수), `--seed=숫자`(다른 구성), `--photos=false`(사진 없이 빠르게), `--dry=true`(쓰지 않고 검사만).
 
 ---
 

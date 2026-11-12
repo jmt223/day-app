@@ -28,6 +28,7 @@ import { useLocale } from '@/hooks/use-locale';
 import { useTheme } from '@/hooks/use-theme';
 import type { DayDoc } from '@/types/day';
 import type { FriendEntry, FriendGroup, UserProfile } from '@/types/user';
+import { friendlyErrorMessage } from '@/utils/error-message';
 import { loadSeenMap, markFriendHistorySeen } from '@/utils/friend-update-seen';
 import {
   formatDayLabelShort,
@@ -41,6 +42,12 @@ import {
 } from '@/utils/date';
 
 type ViewMode = 'calendar' | 'timeline';
+
+/** 예정 DAY 목록 순서: 오늘 확정할 수 있는 것 → 다가오는 날짜순 → 기한이 지난 것. */
+function draftsInActionOrder(drafts: DayDoc[]): DayDoc[] {
+  const rank = (d: DayDoc) => (isFutureLabel(d.dateLabel) ? 1 : isWritableNow(d.dateLabel) ? 0 : 2);
+  return [...drafts].sort((a, b) => rank(a) - rank(b) || a.dateLabel.localeCompare(b.dateLabel));
+}
 
 export default function HistoryScreen() {
   const theme = useTheme();
@@ -191,7 +198,7 @@ export default function HistoryScreen() {
       load()
         .catch((error) => {
           console.error('연혁을 불러오지 못했어요', error);
-          if (active) setLoadError(error?.message ?? t('common.unknownError'));
+          if (active) setLoadError(friendlyErrorMessage(error));
         })
         .finally(() => {
           if (active) setLoading(false);
@@ -199,11 +206,6 @@ export default function HistoryScreen() {
       return () => {
         active = false;
       };
-      // t는 언어가 바뀔 때마다 새 함수 참조가 되는데, 여기 의존성에 넣으면
-      // (네이티브에서) 언어를 바꿀 때마다 연혁을 불필요하게 다시 통째로
-      // 불러오게 된다 — 에러 메시지 번역 하나 때문에 감수할 비용이 아니라서
-      // 뺀다.
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [load])
   );
 
@@ -214,7 +216,7 @@ export default function HistoryScreen() {
       setLoadError(null);
     } catch (error) {
       console.error('연혁을 불러오지 못했어요', error);
-      setLoadError((error as { message?: string })?.message ?? t('common.unknownError'));
+      setLoadError(friendlyErrorMessage(error));
     } finally {
       setRefreshing(false);
     }
@@ -313,7 +315,9 @@ export default function HistoryScreen() {
               <ThemedText type="label" color="sub">
                 {t('history.drafts')}
               </ThemedText>
-              {drafts.map((d) => {
+              {/* 지금 확정할 수 있는 것 → 다가오는 순 → 기한 지난 것(맨 아래) 순서.
+                  날짜순 그대로면 이제 아무것도 할 수 없는 "기한 만료"가 맨 위를 차지했다. */}
+              {draftsInActionOrder(drafts).map((d) => {
                 const expired = !isFutureLabel(d.dateLabel) && !isWritableNow(d.dateLabel);
                 const dueToday = !isFutureLabel(d.dateLabel) && isWritableNow(d.dateLabel);
                 return (

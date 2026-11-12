@@ -441,7 +441,11 @@ export default function ConversationScreen() {
           {timeline.length === 0 ? (
             <View style={styles.emptyTimeline}>
               <ThemedText type="body" color="sub" style={styles.textCenter}>
-                {t('letters.conversationEmpty', { nickname: otherNickname })}
+                {/* 친구가 아니면 아래 입력칸 대신 "주고받을 수 없어요"가 뜨니, 첫 편지를
+                    보내보라는 안내는 빼야 말이 맞는다. */}
+                {canSendHere
+                  ? t('letters.conversationEmpty', { nickname: otherNickname })
+                  : t('letters.conversationEmptyNotFriend', { nickname: otherNickname })}
               </ThemedText>
             </View>
           ) : (

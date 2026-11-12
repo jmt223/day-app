@@ -54,7 +54,7 @@ storage.rules              Storage 보안 규칙
 
 ## 테스트
 
-로컬 에뮬레이터(운영 서버와 무관한 `demo-` 프로젝트)로 보안 규칙과 Cloud Functions를 같이 돌려볼 수 있습니다. 방법은 [FIREBASE_SETUP.md](./FIREBASE_SETUP.md#로컬-에뮬레이터)에 있습니다.
+로컬 에뮬레이터(운영 서버와 무관한 `demo-` 프로젝트)로 보안 규칙과 Cloud Functions를 같이 돌려볼 수 있습니다. `npm run emu` → `npm run seed`(실제 사용자처럼 쌓인 테스트 데이터) → `npm run web:emu` 순서로 실행하고, 테스트 계정 목록은 [FIREBASE_SETUP.md](./FIREBASE_SETUP.md#로컬-에뮬레이터)에 있습니다.
 
 ```bash
 npx tsc --noEmit   # 타입 검사

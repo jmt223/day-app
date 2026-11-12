@@ -175,9 +175,21 @@ async function withFreshProfiles(days: DayDoc[]): Promise<DayDoc[]> {
 
 export async function getDay(dayId: string): Promise<DayDoc | null> {
   const database = requireDb();
-  const snap = await getDoc(doc(database, 'days', dayId));
+  let snap;
+  try {
+    snap = await getDoc(doc(database, 'days', dayId));
+  } catch (error) {
+    // 남의 DAY가 삭제됐거나 공개범위가 바뀌어 더 이상 볼 수 없으면, 문서가 있어도
+    // 규칙이 읽기를 거부한다(permission-denied) — 보는 사람 입장에선 "없는 DAY"와
+    // 같으니 오류가 아니라 null로 돌려준다(예: 예전에 받은 태그 알림을 눌렀을 때).
+    if ((error as { code?: string })?.code === 'permission-denied') return null;
+    throw error;
+  }
   if (!snap.exists()) return null;
   const day = normalizeDay(snap.id, snap.data());
+  // 지운 DAY(소프트 삭제)는 작성자 본인에게도 "없는 DAY"다 — 예전 알림을 눌러 들어와도
+  // 멀쩡한 글처럼 보이고 댓글까지 달 수 있으면 이상하다(삭제는 되돌릴 수 없다).
+  if (day.deleted) return null;
   const [fresh] = await withFreshProfiles([day]);
   return fresh;
 }
@@ -236,18 +248,43 @@ export async function listFriendsFeed(friendUids: string[], limitCount = 10): Pr
   // 최근에 추가한 친구부터 우선순위를 둘 이유가 없어 그냥 앞의 30명만
   // 대상으로 한다.
   const uids = friendUids.slice(0, 30);
-  const baseConstraints = [
-    where('authorId', 'in', uids),
+  const snaps = await Promise.all(
+    friendFeedQueries(uids).map((constraints) =>
+      getDocs(query(collection(database, 'days'), ...constraints, orderBy('createdAt', 'desc'), limit(limitCount)))
+    )
+  );
+  const days = snaps.flatMap((snap) => snap.docs).map((d) => normalizeDay(d.id, d.data()));
+  days.sort((a, b) => (b.createdAt?.toMillis() ?? 0) - (a.createdAt?.toMillis() ?? 0));
+  return withFreshProfiles(days.slice(0, limitCount));
+}
+
+/** 친구공개 DAY는 보안 규칙(canReadDayData)이 글마다 "작성자의 친구 목록에 내가
+ * 있는지"를 exists()로 확인한다. 'in'에 작성자를 많이 넣으면 그 확인이 한 쿼리
+ * 안에서 작성자 수만큼 늘어나고, 규칙의 문서 조회 한도를 넘는 순간 쿼리 전체가
+ * permission-denied로 실패한다(에뮬레이터 실측: 작성자 21명부터 실패 — 친구가
+ * 많은 사람은 홈 화면이 통째로 안 떴다). 공식 문서의 쿼리 한도는 10번이라 친구공개
+ * 쿼리는 작성자를 10명씩 나눠 보낸다. 전체공개는 규칙이 조회 없이 바로 통과시켜서
+ * 'in' 최대치로 한 번에 보낸다. */
+const FRIENDS_VISIBILITY_AUTHOR_CHUNK = 10;
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
+  return chunks;
+}
+
+/** 친구 DAY 피드를 이루는 쿼리 조건들(정렬·커서·개수 제한 제외): 전체공개 1개 +
+ * 친구공개를 작성자 10명씩 나눈 것들. */
+function friendFeedQueries(uids: string[], extra: QueryConstraint[] = []): QueryConstraint[][] {
+  const base = (authors: string[]) => [
+    where('authorId', 'in', authors),
     where('status', '==', 'confirmed'),
     where('deleted', '==', false),
   ];
-  const [publicSnap, friendsSnap] = await Promise.all([
-    getDocs(query(collection(database, 'days'), ...baseConstraints, where('visibility', '==', 'public'), orderBy('createdAt', 'desc'), limit(limitCount))),
-    getDocs(query(collection(database, 'days'), ...baseConstraints, where('visibility', '==', 'friends'), orderBy('createdAt', 'desc'), limit(limitCount))),
-  ]);
-  const days = [...publicSnap.docs, ...friendsSnap.docs].map((d) => normalizeDay(d.id, d.data()));
-  days.sort((a, b) => (b.createdAt?.toMillis() ?? 0) - (a.createdAt?.toMillis() ?? 0));
-  return withFreshProfiles(days.slice(0, limitCount));
+  return [
+    [...base(uids), where('visibility', '==', 'public'), ...extra],
+    ...chunk(uids, FRIENDS_VISIBILITY_AUTHOR_CHUNK).map((authors) => [...base(authors), where('visibility', '==', 'friends'), ...extra]),
+  ];
 }
 
 /**
@@ -300,13 +337,12 @@ export async function listWorldDaysTodayPage(pageSize: number, cursorLikeCount?:
   return { days, nextCursor: snap.docs.length === pageSize ? lastLikeCount : null };
 }
 
-/** 친구 DAY 전체보기 페이지네이션. listFriendsFeed와 같은 이유로 공개/
- * 친구공개 두 쿼리를 따로 커서를 들고 페이지마다 각각 pageSize만큼
- * 새로 읽어와 합친 뒤 상위 pageSize만 보여준다 — 정확히 "N개씩 딱
- * 맞아떨어지는" 페이지는 아니지만(한쪽에 글이 몰려 있으면 어느 페이지엔
- * 적게 나올 수 있음), 이미 읽은 항목을 다시 읽거나 완전히 건너뛰는 일은
- * 없다. */
-export type FriendFeedCursor = { publicMs: number | null; friendsMs: number | null };
+/** 친구 DAY 전체보기 페이지네이션. listFriendsFeed와 같은 쿼리 묶음을 페이지마다
+ * 각각 pageSize만큼 읽어와 합친 뒤 상위 pageSize만 보여준다. 다음 페이지는 모든
+ * 쿼리를 "이번에 실제로 보여준 마지막 글의 시각"부터 이어 읽는다 — 예전처럼 쿼리마다
+ * "받아온 마지막 글"을 커서로 삼으면, 합치면서 잘라낸 글들을 다음 페이지에서
+ * 건너뛰어 영영 안 보이게 됐다. */
+export type FriendFeedCursor = { beforeMs: number };
 
 export async function listFriendsFeedPage(
   friendUids: string[],
@@ -316,42 +352,22 @@ export async function listFriendsFeedPage(
   if (friendUids.length === 0) return { days: [], nextCursor: null };
   const database = requireDb();
   const uids = friendUids.slice(0, 30);
-  const baseConstraints: QueryConstraint[] = [
-    where('authorId', 'in', uids),
-    where('status', '==', 'confirmed'),
-    where('deleted', '==', false),
-  ];
-  const publicConstraints = [...baseConstraints, where('visibility', '==', 'public'), orderBy('createdAt', 'desc')];
-  if (cursor?.publicMs) publicConstraints.push(startAfter(Timestamp.fromMillis(cursor.publicMs)));
-  const friendsConstraints = [...baseConstraints, where('visibility', '==', 'friends'), orderBy('createdAt', 'desc')];
-  if (cursor?.friendsMs) friendsConstraints.push(startAfter(Timestamp.fromMillis(cursor.friendsMs)));
+  const page: QueryConstraint[] = [orderBy('createdAt', 'desc')];
+  if (cursor?.beforeMs) page.push(startAfter(Timestamp.fromMillis(cursor.beforeMs)));
 
-  const [publicSnap, friendsSnap] = await Promise.all([
-    getDocs(query(collection(database, 'days'), ...publicConstraints, limit(pageSize))),
-    getDocs(query(collection(database, 'days'), ...friendsConstraints, limit(pageSize))),
-  ]);
+  const snaps = await Promise.all(
+    friendFeedQueries(uids).map((constraints) => getDocs(query(collection(database, 'days'), ...constraints, ...page, limit(pageSize))))
+  );
 
-  const days = [...publicSnap.docs, ...friendsSnap.docs].map((d) => normalizeDay(d.id, d.data()));
-  days.sort((a, b) => (b.createdAt?.toMillis() ?? 0) - (a.createdAt?.toMillis() ?? 0));
-
-  const lastPublic = publicSnap.docs[publicSnap.docs.length - 1];
-  const lastFriends = friendsSnap.docs[friendsSnap.docs.length - 1];
-  const hasMore = publicSnap.docs.length === pageSize || friendsSnap.docs.length === pageSize;
+  const createdMs = (d: (typeof snaps)[number]['docs'][number]) => (d.data().createdAt as Timestamp | undefined)?.toMillis() ?? 0;
+  const docs = snaps.flatMap((snap) => snap.docs).sort((a, b) => createdMs(b) - createdMs(a));
+  const shown = docs.slice(0, pageSize);
+  const hasMore = docs.length > pageSize || snaps.some((snap) => snap.docs.length === pageSize);
+  const last = shown[shown.length - 1];
 
   return {
-    days: await withFreshProfiles(days.slice(0, pageSize)),
-    nextCursor: hasMore
-      ? {
-          publicMs:
-            publicSnap.docs.length === pageSize
-              ? ((lastPublic?.data().createdAt as Timestamp | undefined)?.toMillis() ?? null)
-              : (cursor?.publicMs ?? null),
-          friendsMs:
-            friendsSnap.docs.length === pageSize
-              ? ((lastFriends?.data().createdAt as Timestamp | undefined)?.toMillis() ?? null)
-              : (cursor?.friendsMs ?? null),
-        }
-      : null,
+    days: await withFreshProfiles(shown.map((d) => normalizeDay(d.id, d.data()))),
+    nextCursor: hasMore && last ? { beforeMs: createdMs(last) } : null,
   };
 }
 
@@ -734,23 +750,10 @@ export async function listFriendUpdates(friendUids: string[], withinDays = 14): 
   const database = requireDb();
   const uids = friendUids.slice(0, 30);
   const since = Timestamp.fromMillis(Date.now() - withinDays * 24 * 60 * 60 * 1000);
-  const base = [
-    where('authorId', 'in', uids),
-    where('status', '==', 'confirmed'),
-    where('deleted', '==', false),
-  ];
+  // 친구공개 쿼리는 작성자 10명씩 나눠 보낸다(friendFeedQueries 주석 참고).
   const snaps = await Promise.all(
-    (['public', 'friends'] as const).map((visibility) =>
-      getDocs(
-        query(
-          collection(database, 'days'),
-          ...base,
-          where('visibility', '==', visibility),
-          where('createdAt', '>=', since),
-          orderBy('createdAt', 'desc'),
-          limit(60)
-        )
-      )
+    friendFeedQueries(uids, [where('createdAt', '>=', since)]).map((constraints) =>
+      getDocs(query(collection(database, 'days'), ...constraints, orderBy('createdAt', 'desc'), limit(60)))
     )
   );
   const latest = new Map<string, number>();
